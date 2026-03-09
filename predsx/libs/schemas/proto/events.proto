@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package predsx.schemas.v1;
+
+option go_package = "github.com/predsx/predsx/libs/schemas/pb";
+
+import "google/protobuf/timestamp.proto";
+
+// MarketDiscovered is emitted when a new market is found.
+message MarketDiscovered {
+  string id = 1;
+  string slug = 2;
+  string title = 3;
+  string question = 4;
+  string condition_id = 5;
+  google.protobuf.Timestamp start_time = 6;
+  google.protobuf.Timestamp end_time = 7;
+  repeated string outcomes = 8;
+  string status = 9;
+  google.protobuf.Timestamp created_at = 10;
+  string version = 11;
+}
+
+// TokenExtracted is emitted after processing market tokens.
+message TokenExtracted {
+  string market_id = 1;
+  string token_yes = 2;
+  string token_no = 3;
+  string version = 4;
+}
+
+// RawWebsocketEvent captures raw data from upstream.
+message RawWebsocketEvent {
+  string event_type = 1;
+  string token = 2;
+  bytes payload = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+// TradeEvent represents a single trade.
+message TradeEvent {
+  string trade_id = 1;
+  string token = 2;
+  string market_id = 3;
+  double price = 4;
+  double size = 5;
+  string side = 6;
+  google.protobuf.Timestamp timestamp = 7;
+  string version = 8;
+}
+
+// OrderbookUpdate captures a snapshot or delta.
+message OrderbookUpdate {
+  string token = 1;
+  string market_id = 2;
+  repeated PriceLevel bids = 3;
+  repeated PriceLevel asks = 4;
+  string best_bid = 5;
+  string best_ask = 6;
+  google.protobuf.Timestamp timestamp = 7;
+  string version = 8;
+}
+
+message PriceLevel {
+  string price = 1;
+  string size = 2;
+}
+
+// PriceUpdate is the calculated real-time price.
+message PriceUpdate {
+  string market_id = 1;
+  string token = 2;
+  double price = 3;
+  double mid_price = 4;
+  double best_bid = 5;
+  double best_ask = 6;
+  double spread = 7;
+  double last_trade_price = 8;
+  double volume_24h = 9;
+  google.protobuf.Timestamp timestamp = 10;
+  string version = 11;
+}
+
+// NormalizedEvent is the final storage format.
+message NormalizedEvent {
+  string event_type = 1;
+  string market_id = 2;
+  bytes data = 3;
+  map<string, string> metadata = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  string version = 6;
+}
+
+// HistoricalEvent for backfilling.
+message HistoricalEvent {
+  string market_id = 1;
+  string source = 2;
+  string event_type = 3;
+  bytes data = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  string version = 6;
+}

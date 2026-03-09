@@ -1,0 +1,36 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Go build cache
+*.test
+*.out
+
+# Go module download cache
+vendor/
+
+# Environment files (secrets)
+.env
+.env.*
+!.env.example
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker artifacts
+*.tar
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

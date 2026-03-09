@@ -1,0 +1,157 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      - zookeeper
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:latest
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=predsx
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+  # PredSX Services
+  market-discovery:
+    build:
+      context: ..
+      dockerfile: services/market-discovery/Dockerfile
+    depends_on:
+      - kafka
+      - postgres
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - POSTGRES_URL=postgres://postgres:postgres@postgres:5432/predsx?sslmode=disable
+
+  token-extractor:
+    build:
+      context: ..
+      dockerfile: services/token-extractor/Dockerfile
+    depends_on:
+      - kafka
+      - redis
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_ADDR=redis:6379
+
+  stream:
+    build:
+      context: ..
+      dockerfile: services/stream/Dockerfile
+    depends_on:
+      - kafka
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+
+  trade-engine:
+    build:
+      context: ..
+      dockerfile: services/trade-engine/Dockerfile
+    depends_on:
+      - kafka
+      - redis
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_ADDR=redis:6379
+      - WS_RAW_TOPIC=predsx.ws.raw
+      - TRADES_TOPIC=predsx.trades
+
+  orderbook-engine:
+    build:
+      context: ..
+      dockerfile: services/orderbook-engine/Dockerfile
+    depends_on:
+      - kafka
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - WS_RAW_TOPIC=predsx.ws.raw
+      - ORDERBOOK_TOPIC=predsx.orderbook
+
+  price-engine:
+    build:
+      context: ..
+      dockerfile: services/price-engine/Dockerfile
+    depends_on:
+      - kafka
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - TRADES_TOPIC=predsx.trades
+      - ORDERBOOK_TOPIC=predsx.orderbook
+      - PRICES_TOPIC=predsx.prices
+
+  normalizer:
+    build:
+      context: ..
+      dockerfile: services/normalizer/Dockerfile
+    depends_on:
+      - kafka
+      - redis
+      - clickhouse
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_ADDR=redis:6379
+      - CLICKHOUSE_ADDR=clickhouse:9000
+
+  backfill:
+    build:
+      context: ..
+      dockerfile: services/backfill/Dockerfile
+    depends_on:
+      - kafka
+      - postgres
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - POSTGRES_URL=postgres://postgres:postgres@postgres:5432/predsx?sslmode=disable
+
+  api:
+    build:
+      context: ..
+      dockerfile: services/api/Dockerfile
+    depends_on:
+      - redis
+      - clickhouse
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_ADDR=redis:6379
+      - CLICKHOUSE_ADDR=clickhouse:9000
+      - API_PORT=8080
+
+volumes:
+  postgres_data:
+  clickhouse_data:

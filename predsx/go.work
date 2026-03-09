@@ -1,0 +1,24 @@
+go 1.23
+
+use (
+	./libs/clickhouse-client
+	./libs/config
+	./libs/kafka-client
+	./libs/logger
+	./libs/postgres-client
+	./libs/redis-client
+	./libs/retry-utils
+	./libs/schemas
+	./libs/service
+	./libs/websocket-client
+	./services/api
+	./services/backfill
+	./services/market-discovery
+	./services/normalizer
+	./services/orderbook-engine
+	./services/price-engine
+	./services/stream
+	./services/token-extractor
+	./services/trade-engine
+	./cmd/predsx
+)
