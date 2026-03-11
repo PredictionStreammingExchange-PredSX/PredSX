@@ -1,8 +1,10 @@
-go 1.23
+go 1.23.0
 
 use (
+	./cmd/predsx
 	./libs/clickhouse-client
 	./libs/config
+	./libs/crypto
 	./libs/kafka-client
 	./libs/logger
 	./libs/postgres-client
@@ -18,7 +20,7 @@ use (
 	./services/orderbook-engine
 	./services/price-engine
 	./services/stream
+	./services/stream-aggregator
 	./services/token-extractor
 	./services/trade-engine
-	./cmd/predsx
 )

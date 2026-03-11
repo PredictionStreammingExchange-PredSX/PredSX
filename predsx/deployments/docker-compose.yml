@@ -1,6 +1,7 @@
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
+    restart: unless-stopped
     ports:
       - "2181:2181"
     environment:
@@ -9,9 +10,12 @@ services:
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
+    restart: unless-stopped
     ports:
       - "9092:9092"
       - "9094:9094"
+    depends_on:
+      - zookeeper
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -19,16 +23,20 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-    depends_on:
-      - zookeeper
+      # Allow Kafka to auto-create topics with correct defaults
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
 
   redis:
     image: redis:latest
+    restart: unless-stopped
     ports:
       - "6379:6379"
 
   postgres:
-    image: postgres:latest
+    image: postgres:16
+    restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
@@ -40,84 +48,110 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
+    restart: unless-stopped
     ports:
       - "8123:8123"
       - "9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+      # Persist network policy so default user can connect from any Docker container
+      - ./clickhouse/default-user.xml:/etc/clickhouse-server/users.d/default-user.xml
 
-  # PredSX Services
+  # ── PredSX Services ──────────────────────────────────────────────────────────
+
   market-discovery:
     build:
       context: ..
       dockerfile: services/market-discovery/Dockerfile
+    restart: unless-stopped
     depends_on:
       - kafka
       - postgres
     environment:
       - KAFKA_BROKERS=kafka:9092
       - POSTGRES_URL=postgres://postgres:postgres@postgres:5432/predsx?sslmode=disable
+      - MARKET_DISCOVERY_TOPIC=predsx.markets.discovered
+      - POLL_INTERVAL_SECONDS=60
+      - METRICS_PORT=8091
 
   token-extractor:
     build:
       context: ..
       dockerfile: services/token-extractor/Dockerfile
+    restart: unless-stopped
     depends_on:
       - kafka
       - redis
     environment:
       - KAFKA_BROKERS=kafka:9092
       - REDIS_ADDR=redis:6379
+      - MARKET_DISCOVERY_TOPIC=predsx.markets.discovered
+      - TOKEN_EXTRACTOR_TOPIC=predsx.tokens.extracted
+      - CONSUMER_GROUP=token-extractor-group
+      - METRICS_PORT=8092
 
   stream:
     build:
       context: ..
       dockerfile: services/stream/Dockerfile
+    restart: unless-stopped
     depends_on:
       - kafka
     environment:
       - KAFKA_BROKERS=kafka:9092
+      - TOKEN_EXTRACTOR_TOPIC=predsx.tokens.extracted
+      - WS_RAW_TOPIC=predsx.ws.raw
+      - POLYMARKET_WS_URL=wss://clob.polymarket.com/ws
+      - WS_CONNECTIONS=4
+      - METRICS_PORT=8093
 
   trade-engine:
     build:
       context: ..
       dockerfile: services/trade-engine/Dockerfile
+    restart: unless-stopped
     depends_on:
       - kafka
       - redis
     environment:
       - KAFKA_BROKERS=kafka:9092
       - REDIS_ADDR=redis:6379
-      - WS_RAW_TOPIC=predsx.ws.raw
-      - TRADES_TOPIC=predsx.trades
+      - TRADES_LIVE_TOPIC=predsx.trades.live
+      - CONSUMER_GROUP=trade-engine-group
+      - METRICS_PORT=8094
 
   orderbook-engine:
     build:
       context: ..
       dockerfile: services/orderbook-engine/Dockerfile
+    restart: unless-stopped
     depends_on:
       - kafka
     environment:
       - KAFKA_BROKERS=kafka:9092
-      - WS_RAW_TOPIC=predsx.ws.raw
-      - ORDERBOOK_TOPIC=predsx.orderbook
+      - ORDERBOOK_UPDATES_TOPIC=predsx.orderbook.updates
+      - CONSUMER_GROUP=orderbook-engine-group
+      - METRICS_PORT=8095
 
   price-engine:
     build:
       context: ..
       dockerfile: services/price-engine/Dockerfile
+    restart: unless-stopped
     depends_on:
       - kafka
     environment:
       - KAFKA_BROKERS=kafka:9092
-      - TRADES_TOPIC=predsx.trades
-      - ORDERBOOK_TOPIC=predsx.orderbook
+      - TRADES_LIVE_TOPIC=predsx.trades.live
       - PRICES_TOPIC=predsx.prices
+      - CONSUMER_GROUP=price-engine-group
+      - METRICS_PORT=8096
 
   normalizer:
     build:
       context: ..
       dockerfile: services/normalizer/Dockerfile
+    restart: unless-stopped
     depends_on:
       - kafka
       - redis
@@ -125,32 +159,70 @@ services:
     environment:
       - KAFKA_BROKERS=kafka:9092
       - REDIS_ADDR=redis:6379
+      - WS_RAW_TOPIC=predsx.ws.raw
+      - TRADES_BACKFILL_TOPIC=predsx.trades.backfill
+      - TRADES_LIVE_TOPIC=predsx.trades.live
       - CLICKHOUSE_ADDR=clickhouse:9000
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DB=default
+      - BATCH_SIZE=500
+      - FLUSH_INTERVAL_MS=100
+      - METRICS_PORT=8097
+
+  stream-aggregator:
+    build:
+      context: ..
+      dockerfile: services/stream-aggregator/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - clickhouse
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - TRADES_LIVE_TOPIC=predsx.trades.live
+      - METRICS_TRADES_TOPIC=predsx.metrics.trades
+      - CLICKHOUSE_ADDR=clickhouse:9000
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DB=default
+      - METRICS_PORT=8098
 
   backfill:
     build:
       context: ..
       dockerfile: services/backfill/Dockerfile
+    restart: unless-stopped
     depends_on:
       - kafka
       - postgres
     environment:
       - KAFKA_BROKERS=kafka:9092
       - POSTGRES_URL=postgres://postgres:postgres@postgres:5432/predsx?sslmode=disable
+      - TRADES_BACKFILL_TOPIC=predsx.trades.backfill
+      - RATE_LIMIT_MS=100
+      # Override market list if needed: BACKFILL_MARKETS=market-id-1,market-id-2
+      - METRICS_PORT=8099
 
   api:
     build:
       context: ..
       dockerfile: services/api/Dockerfile
+    restart: unless-stopped
     depends_on:
       - redis
       - clickhouse
     ports:
-      - "8080:8080"
+      - "8080:8081"
     environment:
       - REDIS_ADDR=redis:6379
       - CLICKHOUSE_ADDR=clickhouse:9000
-      - API_PORT=8080
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DB=default
+      - API_PORT=8081
+      # BaseService metrics server — kept at 8080 inside container (no external port conflict)
+      - METRICS_PORT=8080
 
 volumes:
   postgres_data:

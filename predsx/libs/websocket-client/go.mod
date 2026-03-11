@@ -7,4 +7,6 @@ require (
 	github.com/predsx/predsx/libs/logger v0.0.0
 )
 
+require golang.org/x/net v0.26.0 // indirect
+
 replace github.com/predsx/predsx/libs/logger => ../logger

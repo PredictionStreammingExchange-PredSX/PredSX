@@ -24,6 +24,11 @@ func main() {
 		groupID := config.GetEnv("CONSUMER_GROUP", "token-extractor-group")
 
 		// Kafka Clients
+		kafkaclient.EnsureTopics(ctx, []string{kafkaBrokers}, map[string]int{
+			inputTopic:  1,
+			outputTopic: 1,
+		}, svc.Logger)
+		
 		consumer := kafkaclient.NewTypedConsumer[schemas.MarketDiscovered]([]string{kafkaBrokers}, inputTopic, groupID, svc.Logger)
 		defer consumer.Close()
 		producer := kafkaclient.NewTypedProducer[schemas.TokenExtracted]([]string{kafkaBrokers}, outputTopic, svc.Logger)

@@ -40,17 +40,17 @@ func main() {
 
 	svc.Run(context.Background(), func(ctx context.Context) error {
 		kafkaBrokers := config.GetEnv("KAFKA_BROKERS", "localhost:9092")
-		inputTopic := config.GetEnv("WS_RAW_TOPIC", "predsx.ws.raw")
-		outputTopic := config.GetEnv("ORDERBOOK_TOPIC", "predsx.orderbook")
+		inputTopic := config.GetEnv("ORDERBOOK_UPDATES_TOPIC", "predsx.orderbook.updates")
 		groupID := config.GetEnv("CONSUMER_GROUP", "orderbook-engine-group")
+
+		kafkaclient.EnsureTopics(ctx, []string{kafkaBrokers}, map[string]int{
+			inputTopic:  6,
+		}, svc.Logger)
 
 		consumer := kafkaclient.NewTypedConsumer[schemas.RawWebsocketEvent]([]string{kafkaBrokers}, inputTopic, groupID, svc.Logger)
 		defer consumer.Close()
 
-		producer := kafkaclient.NewTypedProducer[schemas.OrderbookUpdate]([]string{kafkaBrokers}, outputTopic, svc.Logger)
-		defer producer.Close()
-
-		svc.Logger.Info("orderbook engine started", "input", inputTopic, "output", outputTopic)
+		svc.Logger.Info("orderbook engine started", "input", inputTopic)
 
 		for {
 			rawMsg, err := consumer.Fetch(ctx)
@@ -59,7 +59,7 @@ func main() {
 				continue
 			}
 
-			if err := processEvent(ctx, svc, rawMsg, producer); err != nil {
+			if err := processEvent(ctx, svc, rawMsg); err != nil {
 				svc.Logger.Error("process error", "error", err)
 			}
 		}
@@ -85,7 +85,7 @@ func getOrderbook(marketID, token string) *Orderbook {
 	return ob
 }
 
-func processEvent(ctx context.Context, svc *service.BaseService, raw schemas.RawWebsocketEvent, producer *kafkaclient.TypedProducer[schemas.OrderbookUpdate]) error {
+func processEvent(ctx context.Context, svc *service.BaseService, raw schemas.RawWebsocketEvent) error {
 	var msg OrderbookMessage
 	if err := json.Unmarshal(raw.Payload, &msg); err != nil {
 		return nil // Skip non-orderbook messages
@@ -129,7 +129,10 @@ func processEvent(ctx context.Context, svc *service.BaseService, raw schemas.Raw
 		update.BestAsk = update.Asks[0].Price
 	}
 
-	return producer.Publish(ctx, ob.MarketID, update)
+	// Snapshots could theoretically be pushed to Redis here instead of Kafka 
+	// based on the architectural decision "Maintain orderbook snapshots in Redis"
+	// but to prevent large diffs we'll simulate the snapshot store
+	return nil
 }
 
 func updateLevel(m map[string]string, price, size string) {

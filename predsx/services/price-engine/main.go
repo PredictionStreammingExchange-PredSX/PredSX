@@ -32,10 +32,15 @@ func main() {
 
 	svc.Run(context.Background(), func(ctx context.Context) error {
 		kafkaBrokers := config.GetEnv("KAFKA_BROKERS", "localhost:9092")
-		tradesTopic := config.GetEnv("TRADES_TOPIC", "predsx.trades")
+		tradesTopic := config.GetEnv("TRADES_LIVE_TOPIC", "predsx.trades.live")
 		orderbookTopic := config.GetEnv("ORDERBOOK_TOPIC", "predsx.orderbook")
 		outputTopic := config.GetEnv("PRICES_TOPIC", "predsx.prices")
 		groupID := config.GetEnv("CONSUMER_GROUP", "price-engine-group")
+
+		kafkaclient.EnsureTopics(ctx, []string{kafkaBrokers}, map[string]int{
+			tradesTopic:    6,
+			outputTopic:    3,
+		}, svc.Logger)
 
 		// Kafka Clients
 		tradeConsumer := kafkaclient.NewTypedConsumer[schemas.TradeEvent]([]string{kafkaBrokers}, tradesTopic, groupID, svc.Logger)

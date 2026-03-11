@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/predsx/predsx/libs/logger"
 )
 
@@ -12,6 +13,7 @@ import (
 type Interface interface {
 	Exec(ctx context.Context, query string, args ...any) error
 	Query(ctx context.Context, query string, args ...any) (any, error)
+	PrepareBatch(ctx context.Context, query string, opts ...driver.PrepareBatchOption) (driver.Batch, error)
 	Ping(ctx context.Context) error
 	Close() error
 }

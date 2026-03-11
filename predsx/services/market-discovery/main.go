@@ -37,6 +37,10 @@ func main() {
 		gammaURL := config.GetEnv("GAMMA_API_URL", "https://gamma-api.polymarket.com/markets")
 
 		// Kafka Producer
+		kafkaclient.EnsureTopics(ctx, []string{kafkaBrokers}, map[string]int{
+			topic: 1, // predsx.markets.discovered
+		}, svc.Logger)
+
 		producer := kafkaclient.NewTypedProducer[schemas.MarketDiscovered]([]string{kafkaBrokers}, topic, svc.Logger)
 		defer producer.Close()
 

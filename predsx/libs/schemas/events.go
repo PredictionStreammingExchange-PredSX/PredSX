@@ -130,6 +130,7 @@ func (e *PriceUpdate) Validate() error {
 
 // NormalizedEvent is the final storage format.
 type NormalizedEvent struct {
+	EventID   string            `json:"event_id"`
 	EventType string            `json:"event_type" validate:"required"`
 	MarketID  string            `json:"market_id" validate:"required"`
 	Data      []byte            `json:"data"`
