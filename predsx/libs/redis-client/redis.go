@@ -15,6 +15,8 @@ type Interface interface {
 	SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.BoolCmd
 	Del(ctx context.Context, keys ...string) *redis.IntCmd
 	Scan(ctx context.Context, cursor uint64, match string, count int64) *redis.ScanCmd
+	SMembers(ctx context.Context, key string) *redis.StringSliceCmd
+	SIsMember(ctx context.Context, key string, member interface{}) *redis.BoolCmd
 	Exists(ctx context.Context, keys ...string) *redis.IntCmd
 	Ping(ctx context.Context) error
 	Close() error
@@ -48,4 +50,12 @@ func NewClient(opts Options, log logger.Interface) *Client {
 
 func (c *Client) Ping(ctx context.Context) error {
 	return c.Client.Ping(ctx).Err()
+}
+
+func (c *Client) SMembers(ctx context.Context, key string) *redis.StringSliceCmd {
+	return c.Client.SMembers(ctx, key)
+}
+
+func (c *Client) SIsMember(ctx context.Context, key string, member interface{}) *redis.BoolCmd {
+	return c.Client.SIsMember(ctx, key, member)
 }

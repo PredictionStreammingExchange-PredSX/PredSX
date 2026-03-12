@@ -7,6 +7,7 @@ require (
 	github.com/predsx/predsx/libs/kafka-client v0.0.0
 	github.com/predsx/predsx/libs/schemas v0.0.0
 	github.com/predsx/predsx/libs/service v0.0.0
+	github.com/predsx/predsx/libs/redis-client v0.0.0
 )
 
 require (
@@ -36,3 +37,5 @@ replace github.com/predsx/predsx/libs/logger => ../../libs/logger
 replace github.com/predsx/predsx/libs/config => ../../libs/config
 
 replace github.com/predsx/predsx/libs/retry-utils => ../../libs/retry-utils
+
+replace github.com/predsx/predsx/libs/redis-client => ../../libs/redis-client

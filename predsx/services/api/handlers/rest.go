@@ -28,28 +28,69 @@ func (h *APIHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
-	// Logic to fetch markets (e.g., from Redis set or Postgres)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "List of markets"})
+	ctx := r.Context()
+	markets, err := h.Redis.SMembers(ctx, "predsx:markets").Result()
+	if err != nil {
+		http.Error(w, "redis error", http.StatusInternalServerError)
+		return
+	}
+
+	result := make([]map[string]string, 0, len(markets))
+	for _, m := range markets {
+		result = append(result, map[string]string{"market_id": m})
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 func (h *APIHandler) GetMarket(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	vars := mux.Vars(r)
 	id := vars["id"]
-	json.NewEncoder(w).Encode(map[string]string{"id": id, "title": "Sample Market"})
+	
+	exists, err := h.Redis.SIsMember(ctx, "predsx:markets", id).Result()
+	if err != nil {
+		http.Error(w, "redis error", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "market not found", http.StatusNotFound)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"market_id": id})
 }
 
 func (h *APIHandler) GetOrderbook(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	vars := mux.Vars(r)
 	id := vars["id"]
-	// Fetch real-time orderbook from Redis
-	json.NewEncoder(w).Encode(map[string]string{"market_id": id, "bids": "[]", "asks": "[]"})
+	
+	data, err := h.Redis.Get(ctx, "predsx:orderbook:"+id).Result()
+	if err != nil {
+		http.Error(w, "orderbook not found", http.StatusNotFound)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(data))
 }
 
 func (h *APIHandler) GetPrice(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	vars := mux.Vars(r)
 	id := vars["id"]
-	// Fetch real-time price from Redis
-	json.NewEncoder(w).Encode(map[string]string{"market_id": id, "price": "0.5"})
+	
+	data, err := h.Redis.Get(ctx, "predsx:price:"+id).Result()
+	if err != nil {
+		http.Error(w, "price not found", http.StatusNotFound)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(data))
 }
 
 func (h *APIHandler) GetDebugMarkets(w http.ResponseWriter, r *http.Request) {

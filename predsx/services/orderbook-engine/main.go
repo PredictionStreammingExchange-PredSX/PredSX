@@ -9,6 +9,7 @@ import (
 
 	"github.com/predsx/predsx/libs/config"
 	kafkaclient "github.com/predsx/predsx/libs/kafka-client"
+	redisclient "github.com/predsx/predsx/libs/redis-client"
 	"github.com/predsx/predsx/libs/schemas"
 	"github.com/predsx/predsx/libs/service"
 )
@@ -42,10 +43,13 @@ func main() {
 		kafkaBrokers := config.GetEnv("KAFKA_BROKERS", "localhost:9092")
 		inputTopic := config.GetEnv("ORDERBOOK_UPDATES_TOPIC", "predsx.orderbook.updates")
 		groupID := config.GetEnv("CONSUMER_GROUP", "orderbook-engine-group")
+		redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
 
 		kafkaclient.EnsureTopics(ctx, []string{kafkaBrokers}, map[string]int{
 			inputTopic:  6,
 		}, svc.Logger)
+
+		rdb := redisclient.NewClient(redisclient.Options{Addr: redisAddr}, svc.Logger)
 
 		consumer := kafkaclient.NewTypedConsumer[schemas.RawWebsocketEvent]([]string{kafkaBrokers}, inputTopic, groupID, svc.Logger)
 		defer consumer.Close()
@@ -59,7 +63,7 @@ func main() {
 				continue
 			}
 
-			if err := processEvent(ctx, svc, rawMsg); err != nil {
+			if err := processEvent(ctx, svc, rawMsg, rdb); err != nil {
 				svc.Logger.Error("process error", "error", err)
 			}
 		}
@@ -85,7 +89,7 @@ func getOrderbook(marketID, token string) *Orderbook {
 	return ob
 }
 
-func processEvent(ctx context.Context, svc *service.BaseService, raw schemas.RawWebsocketEvent) error {
+func processEvent(ctx context.Context, svc *service.BaseService, raw schemas.RawWebsocketEvent, rdb redisclient.Interface) error {
 	var msg OrderbookMessage
 	if err := json.Unmarshal(raw.Payload, &msg); err != nil {
 		return nil // Skip non-orderbook messages
@@ -129,9 +133,18 @@ func processEvent(ctx context.Context, svc *service.BaseService, raw schemas.Raw
 		update.BestAsk = update.Asks[0].Price
 	}
 
-	// Snapshots could theoretically be pushed to Redis here instead of Kafka 
-	// based on the architectural decision "Maintain orderbook snapshots in Redis"
-	// but to prevent large diffs we'll simulate the snapshot store
+	// Save state to Redis
+	payload := map[string]interface{}{
+		"market_id": ob.MarketID,
+		"bids":      msg.Bids,
+		"asks":      msg.Asks,
+		"timestamp": time.Now().Unix(),
+	}
+	
+	if payloadBytes, err := json.Marshal(payload); err == nil {
+		rdb.Set(ctx, "predsx:orderbook:"+ob.MarketID, payloadBytes, 3600*time.Second)
+	}
+
 	return nil
 }
 

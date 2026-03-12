@@ -104,7 +104,7 @@ func main() {
 // ensureSchema creates the events_raw table if it does not exist, using the
 // Level-10 architecture schema.
 func ensureSchema(ctx context.Context, ch clickhouse.Interface) error {
-	return ch.Exec(ctx, `
+	err := ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS events_raw (
 			event_id    String,
 			type        LowCardinality(String),
@@ -115,11 +115,22 @@ func ensureSchema(ctx context.Context, ch clickhouse.Interface) error {
 		) ENGINE = MergeTree()
 		PARTITION BY toDate(timestamp)
 		ORDER BY (market_id, timestamp)
+		TTL timestamp + INTERVAL 3 DAY;
+	`)
+	
+	if err != nil {
+		return err
+	}
+	
+	// Ensure TTL is applied for existing tables
+	return ch.Exec(ctx, `
+		ALTER TABLE events_raw MODIFY TTL timestamp + INTERVAL 3 DAY;
 	`)
 }
 
 func (n *Normalizer) consumeTopic(ctx context.Context, brokers, topic string) {
-	consumer := kafkaclient.NewTypedConsumer[map[string]interface{}]([]string{brokers}, topic, "normalizer-group", n.svc.Logger)
+	groupID := config.GetEnv("KAFKA_GROUP_ID", "predsx-normalizer")
+	consumer := kafkaclient.NewTypedConsumer[map[string]interface{}]([]string{brokers}, topic, groupID, n.svc.Logger)
 	defer consumer.Close()
 
 	for {
