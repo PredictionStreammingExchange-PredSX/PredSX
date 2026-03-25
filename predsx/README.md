@@ -1,68 +1,81 @@
-# PredSX
+<p align="center">
+  <img src="https://img.shields.io/badge/Language-Go%201.23-00ADD8?logo=go" alt="Go Version">
+  <img src="https://img.shields.io/badge/Streaming-Kafka-231F20?logo=apachekafka" alt="Kafka">
+  <img src="https://img.shields.io/badge/State-Redis-DC382D?logo=redis" alt="Redis">
+  <img src="https://img.shields.io/badge/OLAP-ClickHouse-FFCC01?logo=clickhouse" alt="ClickHouse">
+</p>
 
-PredSX is a production-grade, real-time prediction market data platform built entirely in Go. It ingests live market data from Polymarket, normalizes it, and exposes it through a unified API.
+# PredSX — Real-Time Prediction Market Data Engine
 
-For a complete history of the project's development, see [document.md](../document.md).
+**PredSX** is a production-grade, event-driven data platform built in Go. It ingests live market data from Polymarket, normalizes complex trade events, maintains real-time orderbook states, and broadcasts live data to clients via WebSockets.
 
-## Architecture
+The official React frontend UI for this project is hosted separately at: **[PredSX-Stat](https://github.com/PredictionStreammingExchange-PredSX/PredSX-Stat)**
 
-- **Event-Driven Microservices**: Built in Go, communicating via Kafka.
-- **Data Pipeline**: 
-  - `market-discovery` -> `token-extractor`
-  - `stream` -> `trade-engine`, `orderbook-engine`, `price-engine`
-  - `normalizer` -> ClickHouse
-  - `api` -> REST interface to Redis/ClickHouse
-  - `backfill` -> Historical data ingestion to PostgreSQL/ClickHouse
-- **Infrastructure**: Kafka, Redis, ClickHouse, PostgreSQL.
-- **CLI Tool**: A developer tool for querying market data directly from the command line.
+---
 
-## Project Structure
+## 🚀 Features
 
-- `libs/`: 9 shared production-grade libraries (logger, config, schemas, various DB/Stream clients).
-- `services/`: 9 individual microservices handling the data pipeline.
-- `cmd/predsx/`: Command-line tool for interacting with the platform.
-- `deployments/`: Docker Compose and Kubernetes manifests.
+- **Live Ingestion**: Connects directly to Polymarket WebSockets with robust connection pooling, automatic sharding, and consistent hashing.
+- **Microservices Architecture**: 9 specialized Go microservices decoupled by Apache Kafka arrays.
+- **In-Memory Orderbooks**: Maintains high-performance L2 orderbooks for active tokens directly in Go, persisting snapshots to Redis.
+- **Real-Time Gateway**: Built-in WebSocket hub pushes live `mid_price`, `spread`, trade feeds, and orderbook updates directly to the frontend.
+- **High-Throughput Storage**: Built with localized normalizer worker pools that batch-insert hundreds of events per second into ClickHouse.
 
-## Getting Started
+## 🏗️ Architecture
 
-### Prerequisites
+The system is highly decoupled to allow horizontal scaling of any individual component. 
 
-- Docker and Docker Compose
-- Go 1.23+ (for local development)
-
-### Running the Full Stack
-
-The entire stack (all 9 services + infrastructure) can be brought up using Docker Compose:
-
-```bash
-docker-compose -f deployments/docker-compose.yml up --build -d
+```text
+Polymarket API 
+      │
+      ▼
+[ stream services ] ──► Raw WS events
+      │
+      ├──► [ trade-engine ]     ──► predsx.trades
+      ├──► [ orderbook-engine ] ──► predsx.orderbook 
+      └──► [ price-engine ]     ──► predsx.prices
+                │
+                ▼
+        [ normalizer ] ──► ClickHouse (Batch Insertion)
+                │
+                ▼
+        [ api-gateway ] ──► REST & WebSocket Hub (port 8080)
+                │
+                ▼
+       [ PredSX-Stat UI ]
 ```
 
-> **Note:** First-time builds may take several minutes as Go downloads module dependencies. Subsequent builds are heavily cached and very fast.
+## 📂 Project Structure
 
-### Health Checks
+- `libs/`: Shared production-grade libraries (Kafka clients, ClickHouse, Redis, Websocket pools, Schemas).
+- `services/`: 9 standalone microservices managing the ingestion and processing pipeline.
+- `cmd/predsx/`: A built-in developer CLI tool for testing data streams directly from the terminal.
+- `deployments/`: Docker Compose configurations that orchestrate the 10+ container stack.
 
-Verify the API gateway is healthy:
+---
+
+## 🐳 Getting Started (Docker)
+
+The absolute easiest way to start the entire data pipeline (including Kafka, Redis, ClickHouse, PostgreSQL, and all 9 Go microservices) is to use the provided Windows batch scripts:
+
+```bash
+# From the project root
+
+# 1. Start all 10+ services and background workers
+start-docker.bat
+
+# 2. To completely stop and tear down the environment
+stop-docker.bat
+```
+
+> **Note:** The first `start` may take a few minutes as Go downloads module dependencies inside the containers. Subsequent boots are heavily cached and very fast.
+
+### Health Checks & Monitoring
+
+Verify the API gateway and WebSocket hub are healthy:
 ```bash
 curl http://localhost:8080/health
 ```
 
-Check running containers:
-```bash
-docker ps
-```
-
-### Local Development
-
-The project uses Go workspaces. For local development outside of Docker:
-
-```bash
-go run ./services/api/main.go
-# or build everything
-go build ./...
-```
-
-## Monitoring
-
-- Health: `http://localhost:<service-port>/health`
-- Metrics: `http://localhost:<service-port>/metrics` (Prometheus)
+Prometheus Metrics are automatically exposed by all engines at:
+`http://localhost:<service-port>/metrics`
