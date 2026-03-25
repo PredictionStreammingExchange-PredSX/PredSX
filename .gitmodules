@@ -1,0 +1,3 @@
+[submodule "PredSX-Stat"]
+	path = PredSX-Stat
+	url = https://github.com/PredictionStreammingExchange-PredSX/PredSX-Stat.git
