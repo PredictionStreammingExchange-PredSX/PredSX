@@ -35,6 +35,7 @@ type Worker struct {
 	mu       sync.Mutex
 	msgChan  chan []byte
 	producer *kafkaclient.TypedProducer[schemas.RawWebsocketEvent]
+	subscribed bool
 
 	// drop counter for observable buffer overflow
 	dropCount int64
@@ -125,6 +126,14 @@ func (w *Worker) Start(ctx context.Context) {
 		default:
 		}
 
+		w.mu.Lock()
+		hasTokens := len(w.tokens) > 0
+		w.mu.Unlock()
+		if !hasTokens {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
 		if err := w.connect(ctx); err != nil {
 			w.log.Error("ws connection failed, backing off",
 				"error", err,
@@ -152,24 +161,53 @@ func (w *Worker) connect(ctx context.Context) error {
 		return err
 	}
 	w.client = client
+	w.subscribed = false
 	w.log.Info("connected to websocket")
 
 	// Restore all existing subscriptions after reconnect
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	for token := range w.tokens {
-		w.subscribe(token)
+	if w.sendInitialSubscriptionLocked() {
+		w.subscribed = true
 	}
 	return nil
 }
 
-func (w *Worker) subscribe(token string) {
+func (w *Worker) sendInitialSubscriptionLocked() bool {
+	if w.client == nil || len(w.tokens) == 0 {
+		return false
+	}
+
+	assets := make([]string, 0, len(w.tokens))
+	for token := range w.tokens {
+		assets = append(assets, token)
+	}
+
 	sub := map[string]interface{}{
-		"type":   "subscribe",
-		"assets": []string{token},
+		"type":                   "market",
+		"assets_ids":             assets,
+		"custom_feature_enabled": true,
+		"initial_dump":           true,
 	}
 	data, _ := json.Marshal(sub)
-	w.client.WriteMessage(1, data)
+	if err := w.client.WriteMessage(1, data); err != nil {
+		w.log.Error("failed to send initial subscription", "error", err)
+		return false
+	}
+	w.log.Info("sent initial subscription", "asset_count", len(assets))
+	return true
+}
+
+func (w *Worker) subscribeTokenLocked(token string) {
+	sub := map[string]interface{}{
+		"operation":              "subscribe",
+		"assets_ids":             []string{token},
+		"custom_feature_enabled": true,
+	}
+	data, _ := json.Marshal(sub)
+	if err := w.client.WriteMessage(1, data); err != nil {
+		w.log.Error("failed to send subscription update", "error", err, "token", token)
+	}
 }
 
 func (w *Worker) AddToken(token string) {
@@ -178,13 +216,39 @@ func (w *Worker) AddToken(token string) {
 	if !w.tokens[token] {
 		w.tokens[token] = true
 		if w.client != nil {
-			w.subscribe(token)
+			if !w.subscribed {
+				if w.sendInitialSubscriptionLocked() {
+					w.subscribed = true
+				}
+			} else {
+				w.subscribeTokenLocked(token)
+			}
 		}
 	}
 }
 
 func (w *Worker) readLoop(ctx context.Context) {
 	defer w.client.Close()
+
+	pingStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-pingStop:
+				return
+			case <-ticker.C:
+				if err := w.client.WriteMessage(1, []byte("PING")); err != nil {
+					w.log.Warn("ping failed", "error", err)
+					return
+				}
+			}
+		}
+	}()
+	defer close(pingStop)
 
 	for {
 		select {
@@ -199,8 +263,17 @@ func (w *Worker) readLoop(ctx context.Context) {
 			return
 		}
 
+		if isControlMessage(data) {
+			if string(data) != "PONG" {
+				w.log.Warn("ws control message", "message", string(data))
+			}
+			continue
+		}
+
+		eventType, token := extractEventInfo(data)
 		event := schemas.RawWebsocketEvent{
-			EventType: "polymarket_update",
+			EventType: eventType,
+			Token:     token,
 			Payload:   data,
 			Timestamp: time.Now(),
 		}
@@ -214,4 +287,37 @@ func (w *Worker) readLoop(ctx context.Context) {
 				"worker_id", w.id)
 		}
 	}
+}
+
+func isControlMessage(data []byte) bool {
+	msg := string(data)
+	return msg == "PONG" || msg == "PING" || msg == "INVALID OPERATION"
+}
+
+func extractEventInfo(data []byte) (string, string) {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "polymarket_update", ""
+	}
+
+	eventType, _ := payload["event_type"].(string)
+	if eventType == "" {
+		if t, ok := payload["type"].(string); ok {
+			eventType = t
+		}
+	}
+
+	token := ""
+	if asset, ok := payload["asset_id"].(string); ok {
+		token = asset
+	} else if asset, ok := payload["asset"].(string); ok {
+		token = asset
+	} else if asset, ok := payload["token"].(string); ok {
+		token = asset
+	}
+
+	if eventType == "" {
+		eventType = "polymarket_update"
+	}
+	return eventType, token
 }

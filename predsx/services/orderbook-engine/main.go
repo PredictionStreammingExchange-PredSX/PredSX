@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,12 +43,14 @@ func main() {
 
 	svc.Run(context.Background(), func(ctx context.Context) error {
 		kafkaBrokers := config.GetEnv("KAFKA_BROKERS", "localhost:9092")
-		inputTopic := config.GetEnv("ORDERBOOK_UPDATES_TOPIC", "predsx.orderbook.updates")
+		inputTopic := config.GetEnv("WS_RAW_TOPIC", "predsx.ws.raw")
+		outputTopic := config.GetEnv("ORDERBOOK_UPDATES_TOPIC", "predsx.orderbook.updates")
 		groupID := config.GetEnv("CONSUMER_GROUP", "orderbook-engine-group")
 		redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
 
 		kafkaclient.EnsureTopics(ctx, []string{kafkaBrokers}, map[string]int{
 			inputTopic:  6,
+			outputTopic: 6,
 		}, svc.Logger)
 
 		rdb := redisclient.NewClient(redisclient.Options{Addr: redisAddr}, svc.Logger)
@@ -54,7 +58,10 @@ func main() {
 		consumer := kafkaclient.NewTypedConsumer[schemas.RawWebsocketEvent]([]string{kafkaBrokers}, inputTopic, groupID, svc.Logger)
 		defer consumer.Close()
 
-		svc.Logger.Info("orderbook engine started", "input", inputTopic)
+		producer := kafkaclient.NewTypedProducer[schemas.OrderbookUpdate]([]string{kafkaBrokers}, outputTopic, svc.Logger)
+		defer producer.Close()
+
+		svc.Logger.Info("orderbook engine started", "input", inputTopic, "output", outputTopic)
 
 		for {
 			rawMsg, err := consumer.Fetch(ctx)
@@ -63,7 +70,7 @@ func main() {
 				continue
 			}
 
-			if err := processEvent(ctx, svc, rawMsg, rdb); err != nil {
+			if err := processEvent(ctx, svc, rawMsg, rdb, producer); err != nil {
 				svc.Logger.Error("process error", "error", err)
 			}
 		}
@@ -89,33 +96,90 @@ func getOrderbook(marketID, token string) *Orderbook {
 	return ob
 }
 
-func processEvent(ctx context.Context, svc *service.BaseService, raw schemas.RawWebsocketEvent, rdb redisclient.Interface) error {
-	var msg OrderbookMessage
-	if err := json.Unmarshal(raw.Payload, &msg); err != nil {
+func processEvent(ctx context.Context, svc *service.BaseService, raw schemas.RawWebsocketEvent, rdb redisclient.Interface, producer *kafkaclient.TypedProducer[schemas.OrderbookUpdate]) error {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(raw.Payload, &payload); err != nil {
 		return nil // Skip non-orderbook messages
 	}
 
-	if msg.Type != "snapshot" && msg.Type != "l2update" {
+	eventType := getString(payload, "event_type", "type")
+	if eventType == "" {
 		return nil
 	}
 
-	ob := getOrderbook(msg.MarketID, msg.Asset)
+	marketID := getString(payload, "market_id", "market", "condition_id")
+	if marketID == "" {
+		return nil
+	}
+
+	if eventType != "book" && eventType != "price_change" && eventType != "snapshot" && eventType != "l2update" {
+		return nil
+	}
+
+	if eventType == "price_change" {
+		if changes, ok := payload["price_changes"].([]interface{}); ok {
+			for _, change := range changes {
+				entry, ok := change.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				assetID := getString(entry, "asset_id", "asset", "token")
+				price := getString(entry, "price")
+				size := getString(entry, "size")
+				side := strings.ToLower(getString(entry, "side"))
+				if assetID == "" || price == "" || size == "" {
+					continue
+				}
+				ob := getOrderbook(marketID, assetID)
+				ob.mu.Lock()
+				if side == "buy" || side == "bid" {
+					updateLevel(ob.Bids, price, size)
+				} else if side == "sell" || side == "ask" {
+					updateLevel(ob.Asks, price, size)
+				}
+				emitUpdate(ctx, ob, rdb, producer, svc)
+				ob.mu.Unlock()
+			}
+			return nil
+		}
+	}
+
+	assetID := getString(payload, "asset_id", "asset", "token")
+	if assetID == "" {
+		return nil
+	}
+
+	ob := getOrderbook(marketID, assetID)
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
-	if msg.Type == "snapshot" {
+	if eventType == "book" || eventType == "snapshot" {
 		ob.Bids = make(map[string]string)
 		ob.Asks = make(map[string]string)
 	}
 
-	for _, b := range msg.Bids {
-		updateLevel(ob.Bids, b[0], b[1])
-	}
-	for _, a := range msg.Asks {
-		updateLevel(ob.Asks, a[0], a[1])
+	if eventType == "book" || eventType == "snapshot" {
+		applyLevelsFromValue(ob.Bids, payload["bids"])
+		applyLevelsFromValue(ob.Asks, payload["asks"])
+	} else {
+		price := getString(payload, "price")
+		size := getString(payload, "size")
+		side := strings.ToLower(getString(payload, "side"))
+		if price == "" || size == "" {
+			return nil
+		}
+		if side == "buy" || side == "bid" {
+			updateLevel(ob.Bids, price, size)
+		} else if side == "sell" || side == "ask" {
+			updateLevel(ob.Asks, price, size)
+		}
 	}
 
-	// Compute top 10 and emit
+	emitUpdate(ctx, ob, rdb, producer, svc)
+	return nil
+}
+
+func emitUpdate(ctx context.Context, ob *Orderbook, rdb redisclient.Interface, producer *kafkaclient.TypedProducer[schemas.OrderbookUpdate], svc *service.BaseService) {
 	update := schemas.OrderbookUpdate{
 		MarketID:  ob.MarketID,
 		Token:     ob.Token,
@@ -133,19 +197,73 @@ func processEvent(ctx context.Context, svc *service.BaseService, raw schemas.Raw
 		update.BestAsk = update.Asks[0].Price
 	}
 
-	// Save state to Redis
-	payload := map[string]interface{}{
+	redisPayload := map[string]interface{}{
 		"market_id": ob.MarketID,
-		"bids":      msg.Bids,
-		"asks":      msg.Asks,
+		"bids":      update.Bids,
+		"asks":      update.Asks,
 		"timestamp": time.Now().Unix(),
 	}
-	
-	if payloadBytes, err := json.Marshal(payload); err == nil {
+	if payloadBytes, err := json.Marshal(redisPayload); err == nil {
 		rdb.Set(ctx, "predsx:orderbook:"+ob.MarketID, payloadBytes, 3600*time.Second)
 	}
 
-	return nil
+	if err := producer.Publish(ctx, ob.MarketID, update); err != nil {
+		svc.Logger.Error("failed to publish orderbook update", "error", err)
+	}
+}
+
+func getString(m map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := m[key]; ok {
+			switch t := v.(type) {
+			case string:
+				return t
+			case float64:
+				return trimFloat(t)
+			}
+		}
+	}
+	return ""
+}
+
+func trimFloat(v float64) string {
+	return strings.TrimRight(strings.TrimRight(strconv.FormatFloat(v, 'f', -1, 64), "0"), ".")
+}
+
+func applyLevelsFromValue(levels map[string]string, v interface{}) {
+	switch arr := v.(type) {
+	case []interface{}:
+		for _, item := range arr {
+			switch level := item.(type) {
+			case []interface{}:
+				if len(level) < 2 {
+					continue
+				}
+				price := toString(level[0])
+				size := toString(level[1])
+				if price != "" && size != "" {
+					updateLevel(levels, price, size)
+				}
+			case map[string]interface{}:
+				price := toString(level["price"])
+				size := toString(level["size"])
+				if price != "" && size != "" {
+					updateLevel(levels, price, size)
+				}
+			}
+		}
+	}
+}
+
+func toString(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case float64:
+		return trimFloat(t)
+	default:
+		return ""
+	}
 }
 
 func updateLevel(m map[string]string, price, size string) {

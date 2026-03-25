@@ -1,10 +1,11 @@
-module github.com/predsx/predsx/services/price-engine
+module github.com/predsx/predsx/services/analyzer
 
-go 1.23
+go 1.23.0
 
 require (
 	github.com/predsx/predsx/libs/clickhouse-client v0.0.0
 	github.com/predsx/predsx/libs/config v0.0.0
+	github.com/predsx/predsx/libs/crypto v0.0.0
 	github.com/predsx/predsx/libs/kafka-client v0.0.0
 	github.com/predsx/predsx/libs/redis-client v0.0.0
 	github.com/predsx/predsx/libs/schemas v0.0.0
@@ -42,18 +43,18 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
+replace github.com/predsx/predsx/libs/clickhouse-client => ../../libs/clickhouse-client
+
+replace github.com/predsx/predsx/libs/config => ../../libs/config
+
+replace github.com/predsx/predsx/libs/crypto => ../../libs/crypto
+
 replace github.com/predsx/predsx/libs/kafka-client => ../../libs/kafka-client
+
+replace github.com/predsx/predsx/libs/redis-client => ../../libs/redis-client
 
 replace github.com/predsx/predsx/libs/schemas => ../../libs/schemas
 
 replace github.com/predsx/predsx/libs/service => ../../libs/service
 
 replace github.com/predsx/predsx/libs/logger => ../../libs/logger
-
-replace github.com/predsx/predsx/libs/redis-client => ../../libs/redis-client
-
-replace github.com/predsx/predsx/libs/clickhouse-client => ../../libs/clickhouse-client
-
-replace github.com/predsx/predsx/libs/config => ../../libs/config
-
-replace github.com/predsx/predsx/libs/retry-utils => ../../libs/retry-utils

@@ -49,7 +49,7 @@ func main() {
 		for {
 			msg, err := consumer.Fetch(ctx)
 			if err != nil {
-				svc.Logger.Error("failed to fetch market", "error", err)
+				svc.Logger.Error("failed to fetch market", "error", err.Error())
 				continue
 			}
 
@@ -69,16 +69,19 @@ func processMarket(ctx context.Context, svc *service.BaseService, market schemas
 		return nil
 	}
 
-	// Simulated extraction logic: In a real scenario, this would involve 
-	// parsing market metadata or querying a contract.
-	// For now, we simulate finding YES/NO token addresses.
-	tokenYes := fmt.Sprintf("0xYES_%s", market.ID)
-	tokenNo := fmt.Sprintf("0xNO_%s", market.ID)
+	if len(market.ClobTokenIDs) < 2 {
+		svc.Logger.Warn("missing clob token ids, skipping market", "id", market.ID, "tokens", len(market.ClobTokenIDs))
+		return nil
+	}
+
+	tokenYes := market.ClobTokenIDs[0]
+	tokenNo := market.ClobTokenIDs[1]
 
 	event := schemas.TokenExtracted{
 		MarketID: market.ID,
 		TokenYes: tokenYes,
 		TokenNo:  tokenNo,
+		Exchange: market.Exchange,
 		Version:  schemas.VersionV1,
 	}
 

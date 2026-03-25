@@ -264,22 +264,55 @@ The full project state is now under version control, ready to push to a remote r
 
 ---
 
+## Stage 8 — Production Gap Fixes & Database Integration
+
+### What Happened
+The system was significantly upgraded to replace stub implementations with real data infrastructure:
+- **Redis Integration**: Replaced dummy API data with live state fetches. Persisted the active orderbook state directly to Redis.
+- **ClickHouse**: Implemented rigorous table schema initialization on startup and configured a Time-To-Live (TTL) strategy to gracefully expire raw events.
+- **Normalizer Scale-Out**: Implemented a worker pool inside the `normalizer` service to vastly increase Kafka-to-ClickHouse ingestion throughput via horizontal scaling.
+
+---
+
+## Stage 9 — Real-Time WebSocket Gateway
+
+### What Happened
+A streaming gateway was built directly into the `api` service to push normalized market data straight to browsers.
+- Exposed a new endpoint at `/stream`.
+- Built an internal WebSocket hub to manage hundreds of concurrent client connections.
+- Set up a broadcast mechanism syncing real-time payloads derived from our Kafka streams, closing the loop from upstream Polymarket straight down to the frontend UI.
+
+---
+
+## Stage 10 — End-to-End Pipeline Hardening
+
+### What Happened
+Extensive container and data-flow debugging to solidify the pipeline:
+- **Docker Build Stability**: Solved complex `go.work` and module resolution errors that had severely impacted Docker build times and reliability.
+- **End-to-End Data Flow**: Fixed critical bugs in the Polymarket upstream connection within the `stream` service, verifying the pipeline all the way from external ingestion to the WebSocket hub broadcast.
+- **Developer Experience**: Added `start-docker.bat` and `stop-docker.bat` native utility scripts to make starting up the 10+ container stack frictionless.
+
+---
+
 ## Current System State
 
 | Component | Status |
 |---|---|
 | `libs/` — 9 shared libraries | ✅ Built & tested |
-| `services/` — 9 microservices | ✅ Implemented |
+| `services/` — 9 microservices | ✅ Implemented & hardened |
 | `cmd/predsx` — CLI tool | ✅ Implemented |
 | `deployments/docker-compose.yml` | ✅ Configured |
 | `deployments/k8s/predsx.yaml` | ✅ Configured |
-| Docker builds | ✅ Building successfully |
-| Git version control | ✅ Initial commit made |
+| Database & Streaming | ✅ Redis/ClickHouse/WebSockets integrated |
+| Docker Builds | ✅ Fast & stable |
 
 ### Running the Stack
 ```powershell
-# From the predsx/ directory:
-docker-compose -f deployments/docker-compose.yml up --build -d
+# From the project root, simply run:
+start-docker.bat
+
+# To stop:
+stop-docker.bat
 ```
 
 ### Checking Health
@@ -290,4 +323,4 @@ docker ps                           # All running containers
 
 ---
 
-*Document generated: March 9, 2026*
+*Document updated: March 25, 2026*

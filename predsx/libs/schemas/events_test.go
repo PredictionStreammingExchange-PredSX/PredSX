@@ -37,7 +37,7 @@ func TestEventSerialization(t *testing.T) {
 func TestEventValidation(t *testing.T) {
 	t.Run("Valid TradeEvent", func(t *testing.T) {
 		e := &TradeEvent{
-			ID:       "t1",
+			TradeID:  "t1",
 			MarketID: "m1",
 			Price:    10.5,
 		}
@@ -48,7 +48,7 @@ func TestEventValidation(t *testing.T) {
 
 	t.Run("Invalid TradeEvent", func(t *testing.T) {
 		e := &TradeEvent{
-			ID: "t1",
+			TradeID: "t1",
 		}
 		if err := e.Validate(); err == nil {
 			t.Error("expected error for missing market_id, got nil")

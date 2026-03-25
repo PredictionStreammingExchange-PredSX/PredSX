@@ -3,7 +3,6 @@ package logger
 import (
 	"bytes"
 	"io"
-	"log/slog"
 	"os"
 	"strings"
 	"testing"

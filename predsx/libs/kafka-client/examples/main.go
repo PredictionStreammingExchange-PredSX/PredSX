@@ -22,7 +22,7 @@ func main() {
 	brokers := []string{"localhost:9092"}
 
 	// Create a typed producer
-	producer := kafka.NewTypedProducer[MyEvent](brokers, "test-topic", l)
+	producer := kafkaclient.NewTypedProducer[MyEvent](brokers, "test-topic", l)
 	defer producer.Close()
 
 	event := MyEvent{
@@ -37,7 +37,7 @@ func main() {
 	fmt.Println("Published event")
 
 	// Create a typed consumer
-	consumer := kafka.NewTypedConsumer[MyEvent](brokers, "test-topic", "test-group", l)
+	consumer := kafkaclient.NewTypedConsumer[MyEvent](brokers, "test-topic", "test-group", l)
 	defer consumer.Close()
 
 	// In a real app, this would be in a loop

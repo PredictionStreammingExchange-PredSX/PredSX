@@ -102,7 +102,7 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - TOKEN_EXTRACTOR_TOPIC=predsx.tokens.extracted
       - WS_RAW_TOPIC=predsx.ws.raw
-      - POLYMARKET_WS_URL=wss://clob.polymarket.com/ws
+      - POLYMARKET_WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market
       - WS_CONNECTIONS=4
       - METRICS_PORT=8093
 
@@ -141,11 +141,18 @@ services:
     restart: unless-stopped
     depends_on:
       - kafka
+      - redis
+      - clickhouse
     environment:
       - KAFKA_BROKERS=kafka:9092
       - TRADES_LIVE_TOPIC=predsx.trades.live
       - PRICES_TOPIC=predsx.prices
       - CONSUMER_GROUP=price-engine-group
+      - REDIS_ADDR=redis:6379
+      - CLICKHOUSE_ADDR=clickhouse:9000
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DB=default
       - METRICS_PORT=8096
 
   normalizer:
@@ -171,6 +178,35 @@ services:
       - BATCH_SIZE=500
       - FLUSH_INTERVAL_MS=100
       - METRICS_PORT=8097
+
+  analyzer:
+    build:
+      context: ..
+      dockerfile: services/analyzer/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - redis
+      - clickhouse
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - TRADES_LIVE_TOPIC=predsx.trades.live
+      - ORDERBOOK_UPDATES_TOPIC=predsx.orderbook.updates
+      - SIGNALS_TOPIC=predsx.signals.live
+      - REDIS_ADDR=redis:6379
+      - CLICKHOUSE_ADDR=clickhouse:9000
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+      - CLICKHOUSE_DB=default
+      - EMA_ALPHA=0.2
+      - IMBALANCE_DEPTH=10
+      - SPREAD_THRESHOLD=0.03
+      - IMBALANCE_THRESHOLD=0.35
+      - LIQUIDITY_GAP_THRESHOLD=0.05
+      - ARBITRAGE_THRESHOLD=0.02
+      - HIST_CONTEXT_TTL_SEC=60
+      - SIGNAL_EMIT_ALL=0
+      - METRICS_PORT=8100
 
   stream-aggregator:
     build:
@@ -202,8 +238,13 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - POSTGRES_URL=postgres://postgres:postgres@postgres:5432/predsx?sslmode=disable
       - TRADES_BACKFILL_TOPIC=predsx.trades.backfill
-      - RATE_LIMIT_MS=100
+      - RATE_LIMIT_MS=250
+      - BACKFILL_WORKERS=4
+      - DATA_RATE_LIMIT_MS=250
+      - CLOB_RATE_LIMIT_MS=250
+      - GAMMA_RATE_LIMIT_MS=250
       # Override market list if needed: BACKFILL_MARKETS=market-id-1,market-id-2
+      # Limit number of markets for quick tests: BACKFILL_MARKET_LIMIT=50
       - METRICS_PORT=8099
 
   api:
@@ -212,11 +253,17 @@ services:
       dockerfile: services/api/Dockerfile
     restart: unless-stopped
     depends_on:
+      - kafka
       - redis
       - clickhouse
     ports:
       - "8080:8081"
     environment:
+      - KAFKA_BROKERS=kafka:9092
+      - TRADES_LIVE_TOPIC=predsx.trades.live
+      - ORDERBOOK_UPDATES_TOPIC=predsx.orderbook.updates
+      - PRICES_TOPIC=predsx.prices
+      - SIGNALS_TOPIC=predsx.signals.live
       - REDIS_ADDR=redis:6379
       - CLICKHOUSE_ADDR=clickhouse:9000
       - CLICKHOUSE_USER=default

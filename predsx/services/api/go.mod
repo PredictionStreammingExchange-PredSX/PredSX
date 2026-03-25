@@ -4,10 +4,13 @@ go 1.23
 
 require (
 	github.com/gorilla/mux v1.8.1
+	github.com/gorilla/websocket v1.5.1
 	github.com/predsx/predsx/libs/clickhouse-client v0.0.0
 	github.com/predsx/predsx/libs/config v0.0.0
+	github.com/predsx/predsx/libs/kafka-client v0.0.0
 	github.com/predsx/predsx/libs/logger v0.0.0
 	github.com/predsx/predsx/libs/redis-client v0.0.0
+	github.com/predsx/predsx/libs/schemas v0.0.0
 	github.com/predsx/predsx/libs/service v0.0.0
 	github.com/prometheus/client_golang v1.20.0
 )
@@ -32,9 +35,11 @@ require (
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/redis/go-redis/v9 v9.5.1 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
+	github.com/segmentio/kafka-go v0.4.47 // indirect
 	github.com/shopspring/decimal v1.3.1 // indirect
 	go.opentelemetry.io/otel v1.24.0 // indirect
 	go.opentelemetry.io/otel/trace v1.24.0 // indirect
+	golang.org/x/net v0.26.0 // indirect
 	golang.org/x/sys v0.22.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
@@ -51,3 +56,7 @@ replace github.com/predsx/predsx/libs/logger => ../../libs/logger
 replace github.com/predsx/predsx/libs/config => ../../libs/config
 
 replace github.com/predsx/predsx/libs/retry-utils => ../../libs/retry-utils
+
+replace github.com/predsx/predsx/libs/kafka-client => ../../libs/kafka-client
+
+replace github.com/predsx/predsx/libs/schemas => ../../libs/schemas

@@ -28,17 +28,21 @@ const (
 
 // MarketDiscovered is emitted when a new market is found.
 type MarketDiscovered struct {
-	ID          string    `json:"id" validate:"required"`
-	Slug        string    `json:"slug" validate:"required"`
-	Title       string    `json:"title"`
-	Question    string    `json:"question"`
-	ConditionID string    `json:"condition_id"`
-	StartTime   time.Time `json:"start_time"`
-	EndTime     time.Time `json:"end_time"`
-	Outcomes    []string  `json:"outcomes"`
-	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"created_at"`
-	Version     string    `json:"version"`
+	ID           string    `json:"id" validate:"required"`
+	Slug         string    `json:"slug" validate:"required"`
+	Title        string    `json:"title"`
+	Question     string    `json:"question"`
+	ConditionID  string    `json:"condition_id"`
+	ClobTokenIDs []string  `json:"clob_token_ids"`
+	Exchange     string    `json:"exchange"`
+	EventID      string    `json:"event_id"`
+	Raw          string    `json:"raw"`
+	StartTime    time.Time `json:"start_time"`
+	EndTime      time.Time `json:"end_time"`
+	Outcomes     []string  `json:"outcomes"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
+	Version      string    `json:"version"`
 }
 
 func (e *MarketDiscovered) Validate() error {
@@ -53,6 +57,7 @@ type TokenExtracted struct {
 	MarketID string `json:"market_id" validate:"required"`
 	TokenYes string `json:"token_yes" validate:"required"`
 	TokenNo  string `json:"token_no" validate:"required"`
+	Exchange string `json:"exchange"`
 	Version  string `json:"version"`
 }
 
@@ -84,14 +89,14 @@ func (e *TradeEvent) Validate() error {
 
 // OrderbookUpdate captures a snapshot or delta.
 type OrderbookUpdate struct {
-	Token     string      `json:"token" validate:"required"`
-	MarketID  string      `json:"market_id" validate:"required"`
+	Token     string       `json:"token" validate:"required"`
+	MarketID  string       `json:"market_id" validate:"required"`
 	Bids      []PriceLevel `json:"bids"`
 	Asks      []PriceLevel `json:"asks"`
-	BestBid   string      `json:"best_bid"`
-	BestAsk   string      `json:"best_ask"`
-	Timestamp time.Time   `json:"timestamp"`
-	Version   string      `json:"version"`
+	BestBid   string       `json:"best_bid"`
+	BestAsk   string       `json:"best_ask"`
+	Timestamp time.Time    `json:"timestamp"`
+	Version   string       `json:"version"`
 }
 
 type PriceLevel struct {
@@ -124,6 +129,27 @@ type PriceUpdate struct {
 func (e *PriceUpdate) Validate() error {
 	if e.MarketID == "" || e.Price <= 0 {
 		return fmt.Errorf("invalid price update data")
+	}
+	return nil
+}
+
+// SignalEvent represents a real-time analyzer signal.
+type SignalEvent struct {
+	SignalID   string                 `json:"signal_id" validate:"required"`
+	MarketID   string                 `json:"market_id" validate:"required"`
+	Token      string                 `json:"token"`
+	SignalType string                 `json:"signal_type" validate:"required"`
+	Value      float64                `json:"value"`
+	Threshold  float64                `json:"threshold"`
+	Severity   string                 `json:"severity"`
+	Details    map[string]interface{} `json:"details"`
+	Timestamp  time.Time              `json:"timestamp"`
+	Version    string                 `json:"version"`
+}
+
+func (e *SignalEvent) Validate() error {
+	if e.SignalID == "" || e.MarketID == "" || e.SignalType == "" {
+		return fmt.Errorf("invalid signal event data")
 	}
 	return nil
 }

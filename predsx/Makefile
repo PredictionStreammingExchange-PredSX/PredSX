@@ -1,6 +1,6 @@
 .PHONY: run build clean test
 
-SERVICES := market-discovery token-extractor stream trade-engine orderbook-engine price-engine normalizer backfill api
+SERVICES := market-discovery token-extractor stream trade-engine orderbook-engine price-engine normalizer analyzer backfill api
 
 run:
 	docker-compose -f deployments/docker-compose.yml up --build
