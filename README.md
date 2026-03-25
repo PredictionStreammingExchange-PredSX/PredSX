@@ -43,3 +43,40 @@ Polymarket API
                 │
                 ▼
        [ PredSX-Stat UI ]
+```
+
+## 📂 Project Structure
+
+- `predsx/libs/`: Shared production-grade libraries (Kafka clients, ClickHouse, Redis, Websocket pools, Schemas).
+- `predsx/services/`: 9 standalone microservices managing the ingestion and processing pipeline.
+- `predsx/cmd/predsx/`: A built-in developer CLI tool for testing data streams directly from the terminal.
+- `predsx/deployments/`: Docker Compose configurations that orchestrate the 10+ container stack.
+- `frontend/`: (Optional) The React UI submodule.
+
+---
+
+## 🐳 Getting Started (Docker)
+
+The absolute easiest way to start the entire data pipeline (including Kafka, Redis, ClickHouse, PostgreSQL, and all 9 Go microservices) is to use the provided Windows batch scripts:
+
+```bash
+# From the project root
+
+# 1. Start all 10+ services and background workers
+start-docker.bat
+
+# 2. To completely stop and tear down the environment
+stop-docker.bat
+```
+
+> **Note:** The first `start` may take a few minutes as Go downloads module dependencies inside the containers. Subsequent boots are heavily cached and very fast.
+
+### Health Checks & Monitoring
+
+Verify the API gateway and WebSocket hub are healthy:
+```bash
+curl http://localhost:8080/health
+```
+
+Prometheus Metrics are automatically exposed by all engines at:
+`http://localhost:<service-port>/metrics`
