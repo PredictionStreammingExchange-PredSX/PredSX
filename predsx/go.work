@@ -1,4 +1,4 @@
-go 1.23.0
+go 1.24.0
 
 use (
 	./cmd/predsx
@@ -13,9 +13,11 @@ use (
 	./libs/schemas
 	./libs/service
 	./libs/websocket-client
-	./services/api
 	./services/analyzer
+	./services/api
 	./services/backfill
+	./services/backtester
+	./services/indexer
 	./services/market-discovery
 	./services/normalizer
 	./services/orderbook-engine

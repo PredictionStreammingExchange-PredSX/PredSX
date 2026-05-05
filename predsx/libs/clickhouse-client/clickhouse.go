@@ -12,7 +12,7 @@ import (
 // Interface defines the ClickHouse client methods.
 type Interface interface {
 	Exec(ctx context.Context, query string, args ...any) error
-	Query(ctx context.Context, query string, args ...any) (any, error)
+	Query(ctx context.Context, query string, args ...any) (driver.Rows, error)
 	PrepareBatch(ctx context.Context, query string, opts ...driver.PrepareBatchOption) (driver.Batch, error)
 	Ping(ctx context.Context) error
 	Close() error
@@ -57,7 +57,7 @@ func (c *Client) Ping(ctx context.Context) error {
 	return c.Conn.Ping(ctx)
 }
 
-func (c *Client) Query(ctx context.Context, query string, args ...any) (any, error) {
+func (c *Client) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
 	return c.Conn.Query(ctx, query, args...)
 }
 

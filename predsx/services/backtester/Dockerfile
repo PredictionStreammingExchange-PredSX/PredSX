@@ -1,0 +1,17 @@
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+COPY go.work go.work.sum ./
+COPY libs/ libs/
+COPY cmd/ cmd/
+COPY services/ services/
+
+WORKDIR /app/services/backtester
+RUN go build -o backtester main.go
+
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+WORKDIR /app
+COPY --from=builder /app/services/backtester/backtester .
+
+CMD ["./backtester"]

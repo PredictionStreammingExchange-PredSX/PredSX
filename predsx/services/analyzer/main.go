@@ -31,6 +31,9 @@ type Analyzer struct {
 	imbalanceThreshold  float64
 	liquidityGapThresh  float64
 	arbitrageThreshold  float64
+	volumeSpikeThreshold float64
+	momentumThreshold    float64
+	whaleThreshold       float64
 	emitAll             bool
 
 	histTTL  time.Duration
@@ -77,6 +80,9 @@ func main() {
 		imbalanceThreshold := getEnvFloat("IMBALANCE_THRESHOLD", 0.35)
 		liquidityGapThresh := getEnvFloat("LIQUIDITY_GAP_THRESHOLD", 0.05)
 		arbitrageThreshold := getEnvFloat("ARBITRAGE_THRESHOLD", 0.02)
+		volumeSpikeThreshold := getEnvFloat("VOLUME_SPIKE_THRESHOLD", 5.0)
+		momentumThreshold := getEnvFloat("MOMENTUM_THRESHOLD", 0.05)
+		whaleThreshold := getEnvFloat("WHALE_THRESHOLD_USDC", 10000.0)
 		emitAll := config.GetEnv("SIGNAL_EMIT_ALL", "") == "1"
 		histTTL := time.Duration(config.GetEnvInt("HIST_CONTEXT_TTL_SEC", 60)) * time.Second
 
@@ -93,10 +99,13 @@ func main() {
 			svc.Logger.Warn("clickhouse unavailable, historical context disabled", "error", err)
 		}
 
+		onChainTopic := config.GetEnv("ONCHAIN_TRADES_TOPIC", "predsx.trades.onchain")
+
 		kafkaclient.EnsureTopics(ctx, []string{kafkaBrokers}, map[string]int{
 			tradesTopic:    6,
 			orderbookTopic: 6,
 			signalsTopic:   6,
+			onChainTopic:   6,
 		}, svc.Logger)
 
 		an := &Analyzer{
@@ -110,6 +119,9 @@ func main() {
 			imbalanceThreshold: imbalanceThreshold,
 			liquidityGapThresh: liquidityGapThresh,
 			arbitrageThreshold: arbitrageThreshold,
+			volumeSpikeThreshold: volumeSpikeThreshold,
+			momentumThreshold:  momentumThreshold,
+			whaleThreshold:     whaleThreshold,
 			emitAll:            emitAll,
 			histTTL:            histTTL,
 			histCache:          make(map[string]historicalStats),
@@ -136,6 +148,12 @@ func main() {
 			an.consumeOrderbook(ctx, kafkaBrokers, orderbookTopic)
 		}()
 
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			an.consumeOnChainTrades(ctx, kafkaBrokers, onChainTopic)
+		}()
+
 		wg.Wait()
 		return nil
 	})
@@ -159,6 +177,81 @@ func (a *Analyzer) consumeTrades(ctx context.Context, brokers, topic string) {
 		// Store last trade price for context
 		if evt.Token != "" {
 			a.storeMid(evt.Token, evt.Price)
+			a.processTrade(ctx, evt)
+		}
+	}
+}
+
+func (a *Analyzer) consumeOnChainTrades(ctx context.Context, brokers, topic string) {
+	consumer := kafkaclient.NewTypedConsumer[schemas.OnChainTradeEvent]([]string{brokers}, topic, "analyzer-onchain", a.svc.Logger)
+	defer consumer.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		evt, err := consumer.Fetch(ctx)
+		if err != nil {
+			a.svc.Logger.Error("onchain fetch error", "error", err)
+			continue
+		}
+		
+		// Polymarket tokens have 6 decimals.
+		amount, _ := strconv.ParseFloat(evt.Amount, 64)
+		normalizedAmount := amount / 1000000.0
+
+		if a.emitAll || normalizedAmount >= a.whaleThreshold {
+			details := map[string]interface{}{
+				"tx_hash": evt.TxHash,
+				"maker":   evt.Maker,
+				"taker":   evt.Taker,
+				"amount":  normalizedAmount,
+			}
+			a.emitSignal(ctx, "ONCHAIN", evt.TokenID, "whale_alert", normalizedAmount, a.whaleThreshold, details)
+		}
+	}
+}
+
+func (a *Analyzer) processTrade(ctx context.Context, evt schemas.TradeEvent) {
+	if evt.Size <= 0 || evt.Price <= 0 {
+		return
+	}
+
+	// 1. Volume Spikes
+	// Keep track of average trade size using EMA
+	emaVol := a.updateEMA(ctx, evt.MarketID, "trade_size", evt.Size)
+	
+	// If the current trade size is substantially larger than the EMA
+	if emaVol > 0 {
+		ratio := evt.Size / emaVol
+		if a.emitAll || ratio >= a.volumeSpikeThreshold {
+			details := map[string]interface{}{
+				"trade_size": evt.Size,
+				"ema_trade_size": emaVol,
+				"ratio": ratio,
+				"price": evt.Price,
+			}
+			a.emitSignal(ctx, evt.MarketID, evt.Token, "volume_spike", ratio, a.volumeSpikeThreshold, details)
+		}
+	}
+
+	// 2. Momentum
+	// Track the EMA of the price
+	emaPrice := a.updateEMA(ctx, evt.MarketID, "price", evt.Price)
+	
+	// Calculate the deviation of the current price from the EMA price
+	if emaPrice > 0 {
+		momentum := (evt.Price - emaPrice) / emaPrice
+		absMomentum := math.Abs(momentum)
+		if a.emitAll || absMomentum >= a.momentumThreshold {
+			details := map[string]interface{}{
+				"trade_price": evt.Price,
+				"ema_price": emaPrice,
+				"momentum": momentum,
+			}
+			a.emitSignal(ctx, evt.MarketID, evt.Token, "momentum", absMomentum, a.momentumThreshold, details)
 		}
 	}
 }

@@ -209,3 +209,21 @@ func GetVersion(data []byte) (string, error) {
 	}
 	return "", fmt.Errorf("version not found")
 }
+
+// OnChainTradeEvent represents a raw blockchain transfer.
+type OnChainTradeEvent struct {
+	TxHash    string    `json:"tx_hash" validate:"required"`
+	Maker     string    `json:"maker" validate:"required"`
+	Taker     string    `json:"taker" validate:"required"`
+	TokenID   string    `json:"token_id"`
+	Amount    string    `json:"amount"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+func (e *OnChainTradeEvent) Validate() error {
+	if e.TxHash == "" || e.Maker == "" || e.Taker == "" {
+		return fmt.Errorf("tx_hash, maker, and taker are required")
+	}
+	return nil
+}
+

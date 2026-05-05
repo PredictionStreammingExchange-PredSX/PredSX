@@ -60,7 +60,7 @@ func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
 
 	query := `
 		SELECT
-			market_id, slug, title, question,
+			market_id, slug, title, question, condition_id,
 			status, exchange, event_id,
 			start_time, end_time, outcomes, raw
 		FROM market_metadata
@@ -88,18 +88,19 @@ func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
 		Scan(dest ...interface{}) error
 	}); ok {
 		for sqlRows.Next() {
-			var marketID, slug, title, question, statusVal, exchangeVal, eventID, outcomes, raw string
+			var marketID, slug, title, question, conditionID, statusVal, exchangeVal, eventID, outcomes, raw string
 			var startTime, endTime time.Time
-			if err := sqlRows.Scan(&marketID, &slug, &title, &question, &statusVal, &exchangeVal, &eventID, &startTime, &endTime, &outcomes, &raw); err != nil {
+			if err := sqlRows.Scan(&marketID, &slug, &title, &question, &conditionID, &statusVal, &exchangeVal, &eventID, &startTime, &endTime, &outcomes, &raw); err != nil {
 				continue
 			}
 
 			meta := map[string]string{
-				"market_id":  marketID,
-				"slug":       slug,
-				"title":      title,
-				"question":   question,
-				"status":     statusVal,
+				"market_id":    marketID,
+				"slug":         slug,
+				"title":        title,
+				"question":     question,
+				"condition_id": conditionID,
+				"status":       statusVal,
 				"exchange":   exchangeVal,
 				"event_id":   eventID,
 				"outcomes":   outcomes,

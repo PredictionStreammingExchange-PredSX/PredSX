@@ -82,7 +82,7 @@ func main() {
 
 		// Protected API Routes
 		api := r.PathPrefix("/v1").Subrouter()
-		api.Use(middleware.Auth(svc.Logger))
+		// api.Use(middleware.Auth(svc.Logger))
 
 		api.HandleFunc("/markets", h.GetMarkets).Methods("GET")
 		api.HandleFunc("/events", h.GetEvents).Methods("GET")

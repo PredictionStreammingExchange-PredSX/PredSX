@@ -68,6 +68,7 @@ func main() {
 		tradesLiveTopic := config.GetEnv("TRADES_LIVE_TOPIC", "predsx.trades.live")
 		orderbookTopic := config.GetEnv("ORDERBOOK_UPDATES_TOPIC", "predsx.orderbook.updates")
 		marketDiscoveryTopic := config.GetEnv("MARKET_DISCOVERY_TOPIC", "predsx.markets.discovered")
+		onChainTopic := config.GetEnv("ONCHAIN_TRADES_TOPIC", "predsx.trades.onchain")
 
 		n := &Normalizer{
 			svc:           svc,
@@ -88,6 +89,7 @@ func main() {
 			tradesLiveTopic:      6,
 			orderbookTopic:       6,
 			marketDiscoveryTopic: 1,
+			onChainTopic:         6,
 		}, svc.Logger)
 
 		var wg sync.WaitGroup
@@ -110,6 +112,11 @@ func main() {
 		go func() {
 			defer wg.Done()
 			n.consumeMarketDiscovery(ctx, kafkaBrokers, marketDiscoveryTopic)
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n.consumeOnChainTrades(ctx, kafkaBrokers, onChainTopic)
 		}()
 
 		wg.Wait()
@@ -145,6 +152,9 @@ func ensureSchema(ctx context.Context, ch clickhouse.Interface) error {
 		return err
 	}
 	if err := ensureMarketMetadataSchema(ctx, ch); err != nil {
+		return err
+	}
+	if err := ensureOnChainSchema(ctx, ch); err != nil {
 		return err
 	}
 	return ensureOrderbookHistorySchema(ctx, ch)
@@ -187,6 +197,21 @@ func ensureOrderbookHistorySchema(ctx context.Context, ch clickhouse.Interface) 
 		) ENGINE = MergeTree()
 		PARTITION BY toDate(timestamp)
 		ORDER BY (market_id, timestamp)
+	`)
+}
+
+func ensureOnChainSchema(ctx context.Context, ch clickhouse.Interface) error {
+	return ch.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS onchain_trades (
+			tx_hash    String,
+			maker      String,
+			taker      String,
+			token_id   String,
+			amount     String,
+			timestamp  DateTime64(3)
+		) ENGINE = MergeTree()
+		PARTITION BY toDate(timestamp)
+		ORDER BY (tx_hash, timestamp)
 	`)
 }
 
@@ -341,7 +366,7 @@ func (n *Normalizer) consumeOrderbookUpdates(ctx context.Context, brokers, topic
 }
 
 func (n *Normalizer) consumeMarketDiscovery(ctx context.Context, brokers, topic string) {
-	groupID := config.GetEnv("NORMALIZER_MARKET_DISCOVERY_GROUP", "predsx-normalizer-market")
+	groupID := config.GetEnv("NORMALIZER_MARKET_DISCOVERY_GROUP", "predsx-normalizer-market-v2")
 	consumer := kafkaclient.NewTypedConsumer[schemas.MarketDiscovered]([]string{brokers}, topic, groupID, n.svc.Logger)
 	defer consumer.Close()
 
@@ -378,6 +403,33 @@ func (n *Normalizer) persistMarketMetadata(ctx context.Context, evt schemas.Mark
 		evt.Status, evt.Exchange, evt.EventID, evt.StartTime, evt.EndTime,
 		outcomes, evt.CreatedAt, evt.Raw); err != nil {
 		n.svc.Logger.Error("failed to insert market metadata", "market_id", evt.ID, "error", err)
+	}
+}
+
+func (n *Normalizer) consumeOnChainTrades(ctx context.Context, brokers, topic string) {
+	groupID := config.GetEnv("NORMALIZER_ONCHAIN_GROUP", "predsx-normalizer-onchain")
+	consumer := kafkaclient.NewTypedConsumer[schemas.OnChainTradeEvent]([]string{brokers}, topic, groupID, n.svc.Logger)
+	defer consumer.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		evt, err := consumer.Fetch(ctx)
+		if err != nil {
+			n.svc.Logger.Error("onchain fetch error", "topic", topic, "error", err)
+			continue
+		}
+		
+		if err := n.clickhouse.Exec(ctx, `
+			INSERT INTO onchain_trades (
+				tx_hash, maker, taker, token_id, amount, timestamp
+			) VALUES (?, ?, ?, ?, ?, ?)
+		`, evt.TxHash, evt.Maker, evt.Taker, evt.TokenID, evt.Amount, evt.Timestamp); err != nil {
+			n.svc.Logger.Error("failed to insert onchain trade", "tx_hash", evt.TxHash, "error", err)
+		}
 	}
 }
 
