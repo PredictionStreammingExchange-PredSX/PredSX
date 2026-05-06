@@ -1,4 +1,6 @@
 FROM golang:1.24-alpine AS builder
+ENV GOMEMLIMIT=1024Mi
+ENV GOGC=20
 
 WORKDIR /app
 COPY go.work go.work.sum ./

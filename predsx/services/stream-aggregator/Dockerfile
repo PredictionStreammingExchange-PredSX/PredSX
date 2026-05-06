@@ -1,4 +1,6 @@
 FROM golang:1.24-alpine AS builder
+ENV GOMEMLIMIT=1024Mi
+ENV GOGC=20
 
 WORKDIR /app
 
@@ -17,5 +19,7 @@ WORKDIR /app/services/stream-aggregator
 RUN go build -p 1 -o /stream-aggregator .
 
 FROM golang:1.24-alpine
+ENV GOMEMLIMIT=1024Mi
+ENV GOGC=20
 COPY --from=builder /stream-aggregator /stream-aggregator
 CMD ["/stream-aggregator"]
