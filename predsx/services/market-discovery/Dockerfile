@@ -1,5 +1,5 @@
 FROM golang:1.24-alpine AS builder
-ENV GOMEMLIMIT=1024Mi
+ENV GOMEMLIMIT=1GiB
 ENV GOGC=20
 
 WORKDIR /app
@@ -19,7 +19,7 @@ WORKDIR /app/services/market-discovery
 RUN go build -p 1 -o /market-discovery .
 
 FROM golang:1.24-alpine
-ENV GOMEMLIMIT=1024Mi
+ENV GOMEMLIMIT=1GiB
 ENV GOGC=20
 COPY --from=builder /market-discovery /market-discovery
 CMD ["/market-discovery"]

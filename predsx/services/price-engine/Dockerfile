@@ -1,5 +1,5 @@
 FROM golang:1.24-alpine AS builder
-ENV GOMEMLIMIT=1024Mi
+ENV GOMEMLIMIT=1GiB
 ENV GOGC=20
 
 WORKDIR /app
@@ -19,7 +19,7 @@ WORKDIR /app/services/price-engine
 RUN go build -p 1 -o /price-engine .
 
 FROM golang:1.24-alpine
-ENV GOMEMLIMIT=1024Mi
+ENV GOMEMLIMIT=1GiB
 ENV GOGC=20
 COPY --from=builder /price-engine /price-engine
 CMD ["/price-engine"]
