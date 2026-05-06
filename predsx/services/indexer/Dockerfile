@@ -7,7 +7,7 @@ COPY cmd/ cmd/
 COPY services/ services/
 
 WORKDIR /app/services/indexer
-RUN go build -o indexer main.go
+RUN go build -p 1 -o indexer main.go
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates

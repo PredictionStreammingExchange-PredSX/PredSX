@@ -1,4 +1,4 @@
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -14,8 +14,8 @@ COPY cmd/predsx/ ./cmd/predsx/
 COPY services/ ./services/
 
 WORKDIR /app/services/stream-aggregator
-RUN go build -o /stream-aggregator .
+RUN go build -p 1 -o /stream-aggregator .
 
-FROM golang:1.23-alpine
+FROM golang:1.24-alpine
 COPY --from=builder /stream-aggregator /stream-aggregator
 CMD ["/stream-aggregator"]

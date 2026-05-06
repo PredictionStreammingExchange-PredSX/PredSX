@@ -14,7 +14,7 @@ COPY cmd/predsx/ ./cmd/predsx/
 COPY services/ ./services/
 
 WORKDIR /app/services/normalizer
-RUN go build -o /normalizer .
+RUN go build -p 1 -o /normalizer .
 
 FROM golang:1.24-alpine
 COPY --from=builder /normalizer /normalizer

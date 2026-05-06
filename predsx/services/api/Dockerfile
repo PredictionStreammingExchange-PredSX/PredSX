@@ -14,7 +14,7 @@ COPY cmd/predsx/ ./cmd/predsx/
 COPY services/ ./services/
 
 WORKDIR /app/services/api
-RUN go build -o /api .
+RUN go build -p 1 -o /api .
 
 FROM golang:1.24-alpine
 COPY --from=builder /api /api

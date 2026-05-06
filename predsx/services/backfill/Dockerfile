@@ -1,4 +1,4 @@
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -14,8 +14,8 @@ COPY cmd/predsx/ ./cmd/predsx/
 COPY services/ ./services/
 
 WORKDIR /app/services/backfill
-RUN go build -o /backfill .
+RUN go build -p 1 -o /backfill .
 
-FROM golang:1.23-alpine
+FROM golang:1.24-alpine
 COPY --from=builder /backfill /backfill
 CMD ["/backfill"]

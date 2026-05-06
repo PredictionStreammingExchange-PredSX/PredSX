@@ -1,4 +1,4 @@
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -14,8 +14,8 @@ COPY cmd/predsx/ ./cmd/predsx/
 COPY services/ ./services/
 
 WORKDIR /app/services/price-engine
-RUN go build -o /price-engine .
+RUN go build -p 1 -o /price-engine .
 
-FROM golang:1.23-alpine
+FROM golang:1.24-alpine
 COPY --from=builder /price-engine /price-engine
 CMD ["/price-engine"]

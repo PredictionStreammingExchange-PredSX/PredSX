@@ -7,7 +7,7 @@ COPY cmd/ cmd/
 COPY services/ services/
 
 WORKDIR /app/services/backtester
-RUN go build -o backtester main.go
+RUN go build -p 1 -o backtester main.go
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
