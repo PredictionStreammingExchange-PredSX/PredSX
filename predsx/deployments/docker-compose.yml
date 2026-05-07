@@ -20,7 +20,7 @@ services:
       - "9094:9094"
     depends_on:
       zookeeper:
-        condition: service_healthy
+        condition: service_started
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
