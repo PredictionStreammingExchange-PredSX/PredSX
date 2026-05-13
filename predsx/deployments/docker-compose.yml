@@ -5,6 +5,8 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_AUTOPURGE_SNAP_RETAIN_COUNT: 3
+      ZOOKEEPER_AUTOPURGE_PURGE_INTERVAL: 24
     deploy:
       resources:
         limits:
@@ -62,6 +64,7 @@ services:
   redis:
     image: redis:latest
     restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "48mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
       - "6379:6379"
     deploy:

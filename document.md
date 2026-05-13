@@ -297,11 +297,39 @@ Extensive container and data-flow debugging to solidify the pipeline:
 ## Current System State
 
 | Component | Status |
+---
+
+## Stage 4 — Production Optimization & Consolidation
+
+### What Happened
+After running the initial 13-service architecture for 48 hours on a 4GB VPS, the system encountered a storage-driven crash. To ensure production stability, the architecture was evolved from a granular microservice model into a **5-Core Hub** model.
+
+### Key Optimization Decisions
+1.  **Hub Consolidation**: Merged 13 services into 5 logical "Hubs" (`discovery`, `ingestion`, `processor`, `storage`, `api`). This reduced Docker RAM overhead by ~30% and simplified inter-service communication.
+2.  **Storage Bypass**: Implemented a "Transit-Mode" policy for Kafka and Docker logs to prevent 100% disk usage.
+3.  **Local Build & Ship**: Transitioned to building container images on local high-power machines and shipping `.tar` files to the VPS to bypass Go compiler RAM spikes.
+
+### The New Hub Mapping
+| New Core Hub | Services Merged |
+|---|---|
+| **Discovery** | `market-discovery`, `token-extractor` |
+| **Ingestion** | `stream`, `stream-aggregator`, `indexer` |
+| **Processor** | `trade-engine`, `orderbook-engine`, `price-engine`, `analyzer` |
+| **Storage** | `normalizer`, `backfill` |
+| **API** | `api` (Gateway) |
+
+### Result
+A significantly more resilient platform that maintains the same high-frequency data results but consumes less RAM and automatically cleans its own storage.
+
+---
+
+## Final Project Checklist
+| Component | Status |
 |---|---|
 | `libs/` — 9 shared libraries | ✅ Built & tested |
-| `services/` — 9 microservices | ✅ Implemented & hardened |
+| `services/` — 13 services merged into 5 Hubs | ✅ Consolidated & Optimized |
 | `cmd/predsx` — CLI tool | ✅ Implemented |
-| `deployments/docker-compose.yml` | ✅ Configured |
+| `deployments/docker-compose.yml` | ✅ Updated for 5 Hubs |
 | `deployments/k8s/predsx.yaml` | ✅ Configured |
 | Database & Streaming | ✅ Redis/ClickHouse/WebSockets integrated |
 | Docker Builds | ✅ Fast & stable |
@@ -317,10 +345,10 @@ stop-docker.bat
 
 ### Checking Health
 ```powershell
-curl http://localhost:8080/health   # API Gateway
+curl http://localhost:8081/health   # API Gateway (Port 8081)
 docker ps                           # All running containers
 ```
 
 ---
 
-*Document updated: March 25, 2026*
+*Document updated: May 11, 2026*

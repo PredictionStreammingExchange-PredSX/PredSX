@@ -1,0 +1,102 @@
+====================================================================
+PredSX - Developer Onboarding Guide & System Diary
+====================================================================
+
+Welcome to PredSX! This document is designed to help new developers understand the architecture, purpose, and deployment strategies of the PredSX platform.
+
+--------------------------------------------------------------------
+1. PROJECT OVERVIEW
+--------------------------------------------------------------------
+PredSX is a production-grade, real-time prediction market data platform. It is designed to ingest live market data (specifically from Polymarket), normalize that data, analyze it for trading signals, and expose it through a unified API and WebSocket gateway. 
+
+The project is split into two main domains:
+1. The Backend ("The Brain"): A highly concurrent, event-driven system built entirely in Go 1.23.
+2. The Frontend (PredSX-Stat): A Next.js production dashboard that visualizes the data and provides trading insights (like the SignalsPanel).
+
+--------------------------------------------------------------------
+2. THE ARCHITECTURE & TECH STACK
+--------------------------------------------------------------------
+The backend utilizes a Microservices architecture managed via Go Workspaces (`go.work`). Originally built as 13 independent microservices, the system has been consolidated into 5 high-performance "Core Hubs" to optimize for VPS resource constraints (4GB RAM).
+
+Core Technologies:
+- Go 1.23: The backbone language for all backend services.
+- Apache Kafka: The central event bus. All inter-service communication happens here (no direct HTTP calls between services).
+- Redis: Used for caching, state management (in-memory orderbooks), and ensuring exact-once idempotency.
+- ClickHouse: A lightning-fast time-series database used for storing historical tick data and massive analytical batch inserts (500 events/100ms).
+- PostgreSQL: Handles relational state such as resumable backfill offsets.
+- Next.js / Tailwind CSS: The frontend stack for the PredSX-Stat dashboard.
+
+Data Flow Summary:
+Polymarket WS -> Discovery Hub -> Ingestion Hub -> Processor Hub -> Kafka -> Storage Hub -> ClickHouse & API Hub -> Next.js Frontend.
+
+--------------------------------------------------------------------
+3. HOW TO USE THE SYSTEM
+--------------------------------------------------------------------
+Once running, the system acts as a central hub for market data:
+- API Gateway (Port 8080): Provides a unified REST API for fetching current market snapshots, historical data, and orderbook states.
+- WebSocket Stream (`/stream`): Provides a live, real-time feed of normalized market events directly to connected clients (like the PredSX-Stat dashboard).
+- CLI Tool (`cmd/predsx`): A developer tool for querying market data directly from your terminal.
+
+--------------------------------------------------------------------
+4. HOW TO START THE PROJECT LOCALLY (WINDOWS/MAC)
+--------------------------------------------------------------------
+We have fully containerized the environment using Docker Compose to ensure local development matches production.
+
+Prerequisites: 
+- Docker Desktop installed and running.
+- Node.js installed (for the frontend).
+
+Steps to start the Backend:
+1. Open a terminal in the root `PredSX` folder.
+2. Run the startup script: 
+   > .\start-docker.bat
+   (This builds and starts all 9 Go microservices, Kafka, Redis, Postgres, and ClickHouse).
+3. Wait for the containers to initialize. You can check the health of the API Gateway by navigating to: `http://localhost:8080/health`
+4. To stop the backend securely, run:
+   > .\stop-docker.bat
+
+Steps to start the Frontend (PredSX-Stat):
+1. Navigate to the frontend directory: `cd PredSX-Stat`
+2. Install dependencies: `npm install`
+3. Run the development server: `npm run dev`
+4. Access the dashboard at `http://localhost:3000`
+
+--------------------------------------------------------------------
+5. HOW TO START THE PROJECT IN VPS (UBUNTU LINUX)
+--------------------------------------------------------------------
+Deploying to a Linux VPS (e.g., a 4GB RAM Ubuntu server) requires slightly different commands, but utilizes the exact same Docker setup.
+
+Prerequisites on VPS:
+- Docker Engine and Docker Compose V2 installed.
+- SSH access configured.
+
+Steps for VPS Deployment:
+1. Transfer your code to the server (via Git clone or SCP).
+2. SSH into your VPS: `ssh user@your-vps-ip`
+3. Navigate to the project directory: `cd ~/PredSX`
+4. Make sure deployment scripts have execution permissions:
+   > chmod +x deploy.sh
+5. You can spin up the backend using standard Docker Compose commands:
+   > docker compose -f predsx/deployments/docker-compose.yml up --build -d
+6. Monitor the logs to ensure everything started smoothly:
+   > docker compose -f predsx/deployments/docker-compose.yml logs -f
+7. For the frontend (PredSX-Stat-Prod), it is recommended to build the Next.js app for production:
+   > cd PredSX-Stat
+   > npm install
+   > npm run build
+   > npm start (or manage it via PM2: `pm2 start npm --name "predsx-frontend" -- start`)
+
+--------------------------------------------------------------------
+8. CRITICAL: VPS Storage & Logging Policy (The "Crash Bypass")
+To prevent the VPS from hitting 100% disk usage and crashing (as seen in earlier 48hr runs), we implement:
+- Docker Log Rotation: Max 10MB per log file, keeping only 3 files.
+- Kafka Retention: Messages expire after 6 hours (Transit Pipe mode).
+- ClickHouse TTL: Historical data older than 30 days is automatically purged to keep the disk lean for AI training.
+
+--------------------------------------------------------------------
+End of Onboarding Guide. Welcome to the team!
+
+### ??? Storage Bypass & AI Intelligence
+- **Policy**: Docker logs (10MB x 3) and Kafka (6h) are for transient system health only.
+- **AI Readiness**: The 'Normalizer' hub flushes ALL raw data into ClickHouse with a 30-day TTL. 
+- **The Brain**: To build AI models or signals, query ClickHouse 'events_raw' directly—do NOT rely on container logs. This ensures your 'AI Intelligence' has high-fidelity data while the VPS disk stays clean.
