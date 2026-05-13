@@ -22,7 +22,7 @@ func main() {
 
 	svc.Run(context.Background(), func(ctx context.Context) error {
 		// Config
-		port := config.GetEnv("API_PORT", "8081")
+		port := config.GetEnv("API_PORT", "8088")
 		kafkaBrokers := config.GetEnv("KAFKA_BROKERS", "localhost:9092")
 		redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
 		chAddr := config.GetEnv("CLICKHOUSE_ADDR", "localhost:9000")
@@ -48,6 +48,7 @@ func main() {
 		h := &handlers.APIHandler{
 			Redis:      rdb,
 			ClickHouse: ch,
+			Logger:     svc.Logger,
 			GammaURL:   gammaBaseURL,
 			DataURL:    dataAPIURL,
 			ClobURL:    clobAPIURL,
@@ -60,7 +61,7 @@ func main() {
 		// Public Routes
 		r.Handle("/metrics", promhttp.Handler())
 		r.HandleFunc("/health", h.GetHealth).Methods("GET")
-		
+
 		// WebSocket Gateway
 		hub := ws.NewHub(svc.Logger)
 		go hub.Run(ctx)

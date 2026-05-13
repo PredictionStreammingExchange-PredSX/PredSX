@@ -17,9 +17,12 @@ import (
 	redisclient "github.com/predsx/predsx/libs/redis-client"
 )
 
+import "github.com/predsx/predsx/libs/logger"
+
 type APIHandler struct {
 	Redis      redisclient.Interface
 	ClickHouse clickhouse.Interface
+	Logger     logger.Interface
 	GammaURL   string
 	DataURL    string
 	ClobURL    string
@@ -43,9 +46,113 @@ func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := parseLimit(getQuery(r, "limit", ""), 50, 500)
+	limit := parseLimit(getQuery(r, "limit", ""), 50, 200)
 	offset := parseOffset(getQuery(r, "offset", ""))
 	status := strings.ToUpper(getQuery(r, "status", ""))
+	results := h.getActivityRankedMarkets(ctx, exchange, status, limit, offset)
+	if len(results) < limit {
+		results = append(results, h.getRecentMarkets(ctx, exchange, status, limit-len(results), results)...)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
+}
+
+func (h *APIHandler) getActivityRankedMarkets(ctx context.Context, exchange string, status string, limit int, offset int) []map[string]interface{} {
+	target := limit + offset
+	if target <= 0 {
+		return nil
+	}
+
+	queryLimit := target * 10
+	if queryLimit < 500 {
+		queryLimit = 500
+	}
+
+	rows, err := h.ClickHouse.Query(ctx, `
+		SELECT market_id, max(timestamp) AS last_seen
+		FROM price_history_1m
+		GROUP BY market_id
+		ORDER BY last_seen DESC
+		LIMIT ?
+	`, queryLimit)
+	if err != nil {
+		h.Logger.Error("activity market query failed", "error", err)
+		return nil
+	}
+	defer func() {
+		if closer, ok := rows.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+	}()
+
+	results := make([]map[string]interface{}, 0, target)
+	seen := make(map[string]struct{})
+
+	if sqlRows, ok := rows.(interface {
+		Next() bool
+		Scan(dest ...interface{}) error
+	}); ok {
+		for sqlRows.Next() {
+			var marketID string
+			var lastSeen time.Time
+			if err := sqlRows.Scan(&marketID, &lastSeen); err != nil {
+				h.Logger.Error("activity market scan failed", "error", err)
+				continue
+			}
+
+			canonicalID := h.resolveCanonicalMarketID(ctx, marketID)
+			if canonicalID == "" {
+				canonicalID = marketID
+			}
+			if _, exists := seen[canonicalID]; exists {
+				continue
+			}
+
+			meta := h.getMarketMetadata(ctx, canonicalID)
+			if len(meta) == 0 && canonicalID != marketID {
+				meta = h.getMarketMetadata(ctx, marketID)
+			}
+			if len(meta) == 0 {
+				continue
+			}
+			if exchange != "" && !strings.EqualFold(meta["exchange"], exchange) {
+				continue
+			}
+			if status != "" && !strings.EqualFold(meta["status"], status) {
+				continue
+			}
+
+			seen[canonicalID] = struct{}{}
+			results = append(results, h.buildMarketSummary(ctx, canonicalID, meta))
+			if len(results) >= target {
+				break
+			}
+		}
+	}
+
+	if offset >= len(results) {
+		return nil
+	}
+
+	end := len(results)
+	if end > offset+limit {
+		end = offset + limit
+	}
+	return results[offset:end]
+}
+
+func (h *APIHandler) getRecentMarkets(ctx context.Context, exchange string, status string, limit int, existing []map[string]interface{}) []map[string]interface{} {
+	if limit <= 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(existing))
+	for _, item := range existing {
+		if marketID, ok := item["market_id"].(string); ok && marketID != "" {
+			seen[marketID] = struct{}{}
+		}
+	}
 
 	var filters []string
 	var args []interface{}
@@ -68,13 +175,17 @@ func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
 	if len(filters) > 0 {
 		query += " WHERE " + strings.Join(filters, " AND ")
 	}
-	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-	args = append(args, limit, offset)
+	query += " ORDER BY created_at DESC LIMIT ?"
+	scanLimit := limit * 5
+	if scanLimit < 200 {
+		scanLimit = 200
+	}
+	args = append(args, scanLimit)
 
 	rows, err := h.ClickHouse.Query(ctx, query, args...)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("clickhouse query error: %v", err), http.StatusInternalServerError)
-		return
+		h.Logger.Error("recent market query failed", "error", err)
+		return nil
 	}
 	defer func() {
 		if closer, ok := rows.(interface{ Close() error }); ok {
@@ -82,7 +193,7 @@ func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	results := make([]map[string]interface{}, 0)
+	results := make([]map[string]interface{}, 0, limit)
 	if sqlRows, ok := rows.(interface {
 		Next() bool
 		Scan(dest ...interface{}) error
@@ -91,6 +202,10 @@ func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
 			var marketID, slug, title, question, conditionID, statusVal, exchangeVal, eventID, outcomes, raw string
 			var startTime, endTime time.Time
 			if err := sqlRows.Scan(&marketID, &slug, &title, &question, &conditionID, &statusVal, &exchangeVal, &eventID, &startTime, &endTime, &outcomes, &raw); err != nil {
+				h.Logger.Error("recent market scan failed", "error", err)
+				continue
+			}
+			if _, exists := seen[marketID]; exists {
 				continue
 			}
 
@@ -101,19 +216,23 @@ func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
 				"question":     question,
 				"condition_id": conditionID,
 				"status":       statusVal,
-				"exchange":   exchangeVal,
-				"event_id":   eventID,
-				"outcomes":   outcomes,
-				"raw":        raw,
-				"start_time": startTime.Format(time.RFC3339),
-				"end_time":   endTime.Format(time.RFC3339),
+				"exchange":     exchangeVal,
+				"event_id":     eventID,
+				"outcomes":     outcomes,
+				"raw":          raw,
+				"start_time":   startTime.Format(time.RFC3339),
+				"end_time":     endTime.Format(time.RFC3339),
 			}
-		results = append(results, h.buildMarketSummary(ctx, marketID, meta))
+
+			seen[marketID] = struct{}{}
+			results = append(results, h.buildMarketSummary(ctx, marketID, meta))
+			if len(results) >= limit {
+				break
+			}
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(results)
+	return results
 }
 
 func (h *APIHandler) GetMarket(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +246,7 @@ func (h *APIHandler) GetMarket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unsupported exchange", http.StatusBadRequest)
 		return
 	}
-	
+
 	exists, err := h.Redis.SIsMember(ctx, "predsx:markets", id).Result()
 	if err != nil {
 		http.Error(w, "redis error", http.StatusInternalServerError)
@@ -152,13 +271,13 @@ func (h *APIHandler) GetOrderbook(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	vars := mux.Vars(r)
 	id := vars["id"]
-	
+
 	data, err := h.Redis.Get(ctx, "predsx:orderbook:"+id).Result()
 	if err != nil {
 		http.Error(w, "orderbook not found", http.StatusNotFound)
 		return
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(data))
 }
@@ -167,13 +286,13 @@ func (h *APIHandler) GetPrice(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	vars := mux.Vars(r)
 	id := vars["id"]
-	
+
 	data, err := h.Redis.Get(ctx, "predsx:price:"+id).Result()
 	if err != nil {
 		http.Error(w, "price not found", http.StatusNotFound)
 		return
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(data))
 }
@@ -217,9 +336,11 @@ func (h *APIHandler) GetMarketTrades(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(getQuery(r, "limit", ""), 100, 5000)
 	from, fromOk := parseTimeParam(getQuery(r, "from", ""))
 	to, toOk := parseTimeParam(getQuery(r, "to", ""))
+	meta := h.getMarketMetadata(ctx, id)
+	conditionID := meta["condition_id"]
 
-	query := "SELECT data FROM events_raw WHERE type='predsx.trades' AND market_id=?"
-	args := []interface{}{id}
+	query := "SELECT data FROM events_raw WHERE type='predsx.trades' AND market_id IN (?, ?)"
+	args := []interface{}{id, conditionID}
 	if fromOk {
 		query += " AND timestamp >= ?"
 		args = append(args, from)
@@ -284,9 +405,11 @@ func (h *APIHandler) GetMarketPriceHistory(w http.ResponseWriter, r *http.Reques
 	} else if resolution == "1s" {
 		table = "market_metrics"
 	}
+	meta := h.getMarketMetadata(ctx, id)
+	conditionID := meta["condition_id"]
 
-	query := fmt.Sprintf("SELECT timestamp, trade_count, volume, avg_price FROM %s WHERE market_id=?", table)
-	args := []interface{}{id}
+	query := fmt.Sprintf("SELECT timestamp, trade_count, volume, avg_price FROM %s WHERE market_id IN (?, ?)", table)
+	args := []interface{}{id, conditionID}
 	if fromOk {
 		query += " AND timestamp >= ?"
 		args = append(args, from)
@@ -671,28 +794,28 @@ func getQuery(r *http.Request, key, fallback string) string {
 }
 
 func parseLimit(raw string, fallback, max int) int {
-  if raw == "" {
-    return fallback
-  }
-  val, err := strconv.Atoi(raw)
-  if err != nil || val <= 0 {
-    return fallback
-  }
-  if val > max {
-    return max
-  }
-  return val
+	if raw == "" {
+		return fallback
+	}
+	val, err := strconv.Atoi(raw)
+	if err != nil || val <= 0 {
+		return fallback
+	}
+	if val > max {
+		return max
+	}
+	return val
 }
 
 func parseOffset(raw string) int {
-  if raw == "" {
-    return 0
-  }
-  val, err := strconv.Atoi(raw)
-  if err != nil || val < 0 {
-    return 0
-  }
-  return val
+	if raw == "" {
+		return 0
+	}
+	val, err := strconv.Atoi(raw)
+	if err != nil || val < 0 {
+		return 0
+	}
+	return val
 }
 
 func parseTimeParam(raw string) (time.Time, bool) {
@@ -718,7 +841,7 @@ func parseTimeParam(raw string) (time.Time, bool) {
 func (h *APIHandler) getMarketMetadata(ctx context.Context, marketID string) map[string]string {
 	meta := map[string]string{}
 	query := `
-		SELECT slug, title, question, status, exchange, event_id,
+		SELECT slug, title, question, condition_id, status, exchange, event_id,
 			start_time, end_time, outcomes, raw
 		FROM market_metadata
 		WHERE market_id = ?
@@ -739,13 +862,14 @@ func (h *APIHandler) getMarketMetadata(ctx context.Context, marketID string) map
 		Next() bool
 		Scan(dest ...interface{}) error
 	}); ok {
-		var slug, title, question, status, exchange, eventID, outcomes, raw string
+		var slug, title, question, conditionID, status, exchange, eventID, outcomes, raw string
 		var startTime, endTime time.Time
 		if sqlRows.Next() {
-			if err := sqlRows.Scan(&slug, &title, &question, &status, &exchange, &eventID, &startTime, &endTime, &outcomes, &raw); err == nil {
+			if err := sqlRows.Scan(&slug, &title, &question, &conditionID, &status, &exchange, &eventID, &startTime, &endTime, &outcomes, &raw); err == nil {
 				meta["slug"] = slug
 				meta["title"] = title
 				meta["question"] = question
+				meta["condition_id"] = conditionID
 				meta["status"] = status
 				meta["exchange"] = exchange
 				meta["event_id"] = eventID
@@ -763,22 +887,45 @@ func (h *APIHandler) getMarketMetadata(ctx context.Context, marketID string) map
 	return meta
 }
 
+func (h *APIHandler) resolveCanonicalMarketID(ctx context.Context, marketID string) string {
+	if marketID == "" {
+		return ""
+	}
+
+	if exists, err := h.Redis.SIsMember(ctx, "predsx:markets", marketID).Result(); err == nil && exists {
+		return marketID
+	}
+
+	if strings.HasPrefix(marketID, "0x") {
+		if resolved, err := h.Redis.Get(ctx, "condition:"+marketID+":market_id").Result(); err == nil && resolved != "" {
+			return resolved
+		}
+	}
+
+	if resolved, err := h.Redis.Get(ctx, "token:"+marketID+":market_id").Result(); err == nil && resolved != "" {
+		return resolved
+	}
+
+	return marketID
+}
+
 func (h *APIHandler) buildMarketSummary(ctx context.Context, marketID string, meta map[string]string) map[string]interface{} {
 	outcomes := parseOutcomes(meta["outcomes"])
-	priceSnap := h.getPriceSnapshot(ctx, marketID)
+	priceSnap := h.getPriceSnapshot(ctx, marketID, meta["condition_id"])
 	tokens := h.getTokenSnapshot(ctx, marketID)
 
 	resp := map[string]interface{}{
-		"market_id": marketID,
-		"exchange":  fallback(meta["exchange"], "polymarket"),
-		"slug":      meta["slug"],
-		"title":     meta["title"],
-		"question":  meta["question"],
-		"status":    meta["status"],
-		"event_id":  meta["event_id"],
-		"outcomes":  outcomes,
-		"start_time": meta["start_time"],
-		"end_time":   meta["end_time"],
+		"market_id":    marketID,
+		"exchange":     fallback(meta["exchange"], "polymarket"),
+		"slug":         meta["slug"],
+		"title":        fallback(meta["title"], meta["question"]),
+		"question":     meta["question"],
+		"status":       meta["status"],
+		"event_id":     meta["event_id"],
+		"outcomes":     outcomes,
+		"condition_id": meta["condition_id"],
+		"start_time":   meta["start_time"],
+		"end_time":     meta["end_time"],
 	}
 
 	if priceSnap != nil {
@@ -787,6 +934,7 @@ func (h *APIHandler) buildMarketSummary(ctx context.Context, marketID string, me
 		resp["best_bid"] = priceSnap["best_bid"]
 		resp["best_ask"] = priceSnap["best_ask"]
 		resp["spread"] = priceSnap["spread"]
+		resp["volume"] = priceSnap["volume_24h"]
 		resp["volume_24h"] = priceSnap["volume_24h"]
 		if p, ok := priceSnap["price"].(float64); ok {
 			resp["yes_price"] = p
@@ -814,16 +962,23 @@ func (h *APIHandler) buildMarketDetail(ctx context.Context, marketID string, met
 	return resp
 }
 
-func (h *APIHandler) getPriceSnapshot(ctx context.Context, marketID string) map[string]interface{} {
-	raw, err := h.Redis.Get(ctx, "live:price:"+marketID).Result()
-	if err != nil || raw == "" {
-		return nil
+func (h *APIHandler) getPriceSnapshot(ctx context.Context, marketID string, conditionID string) map[string]interface{} {
+	keys := []string{"live:price:" + marketID}
+	if conditionID != "" && conditionID != marketID {
+		keys = append(keys, "live:price:"+conditionID)
 	}
-	var parsed map[string]interface{}
-	if json.Unmarshal([]byte(raw), &parsed) != nil {
-		return nil
+	for _, key := range keys {
+		raw, err := h.Redis.Get(ctx, key).Result()
+		if err != nil || raw == "" {
+			continue
+		}
+		var parsed map[string]interface{}
+		if json.Unmarshal([]byte(raw), &parsed) != nil {
+			continue
+		}
+		return parsed
 	}
-	return parsed
+	return nil
 }
 
 func (h *APIHandler) getTokenSnapshot(ctx context.Context, marketID string) map[string]interface{} {

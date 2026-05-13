@@ -1,6 +1,6 @@
 module github.com/predsx/predsx/libs/service
 
-go 1.23
+go 1.24.0
 
 require (
 	github.com/predsx/predsx/libs/config v0.0.0
@@ -16,8 +16,8 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
-	golang.org/x/sys v0.22.0 // indirect
-	google.golang.org/protobuf v1.34.2 // indirect
+	golang.org/x/sys v0.40.0 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 )
 
 replace github.com/predsx/predsx/libs/logger => ../logger

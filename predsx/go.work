@@ -13,17 +13,9 @@ use (
 	./libs/schemas
 	./libs/service
 	./libs/websocket-client
-	./services/analyzer
 	./services/api
-	./services/backfill
-	./services/backtester
-	./services/indexer
-	./services/market-discovery
-	./services/normalizer
-	./services/orderbook-engine
-	./services/price-engine
-	./services/stream
-	./services/stream-aggregator
-	./services/token-extractor
-	./services/trade-engine
+	./services/discovery
+	./services/ingestion
+	./services/processor
+	./services/storage
 )

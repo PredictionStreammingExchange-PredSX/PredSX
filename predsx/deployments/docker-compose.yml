@@ -2,8 +2,6 @@ services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     restart: unless-stopped
-    ports:
-      - "2181:2181"
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -11,6 +9,16 @@ services:
       resources:
         limits:
           memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -31,16 +39,25 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_NUM_PARTITIONS: 6
       KAFKA_DEFAULT_REPLICATION_FACTOR: 1
-      KAFKA_HEAP_OPTS: "-Xms400M -Xmx400M"
+      KAFKA_HEAP_OPTS: "-Xms300M -Xmx300M"
+      # Storage Bypass: 6 hour retention
+      KAFKA_LOG_RETENTION_HOURS: 6
+      KAFKA_LOG_RETENTION_BYTES: 1073741824 # 1GB
     deploy:
       resources:
         limits:
           memory: 600M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "9092"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   redis:
     image: redis:latest
@@ -51,6 +68,16 @@ services:
       resources:
         limits:
           memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   postgres:
     image: postgres:16
@@ -67,8 +94,13 @@ services:
       resources:
         limits:
           memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d predsx"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -81,8 +113,6 @@ services:
       - "9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse/default-user.xml:/etc/clickhouse-server/users.d/default-user.xml
-      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql
     environment:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
@@ -91,333 +121,148 @@ services:
       resources:
         limits:
           memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ── PredSX Go Microservices ──────────────────────────────────────────────────
+  # ── PredSX CORE HUBS (13 -> 5) ──────────────────────────────────────────────
 
-  market-discovery:
+  hub-discovery:
     build:
       context: ..
-      dockerfile: services/market-discovery/Dockerfile
+      dockerfile: services/discovery/Dockerfile
     restart: unless-stopped
     depends_on:
-      kafka:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
+      kafka: { condition: service_healthy }
+      postgres: { condition: service_healthy }
     environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
+      - KAFKA_BROKERS=kafka:9092
       - POSTGRES_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-predsx}?sslmode=disable
-      - MARKET_DISCOVERY_TOPIC=predsx.markets.discovered
-      - POLL_INTERVAL_SECONDS=60
-      - METRICS_PORT=8091
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-
-  token-extractor:
-    build:
-      context: ..
-      dockerfile: services/token-extractor/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
       - REDIS_ADDR=redis:6379
-      - MARKET_DISCOVERY_TOPIC=predsx.markets.discovered
-      - TOKEN_EXTRACTOR_TOPIC=predsx.tokens.extracted
-      - CONSUMER_GROUP=token-extractor-group
-      - METRICS_PORT=8092
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 300M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  stream:
+  hub-ingestion:
     build:
       context: ..
-      dockerfile: services/stream/Dockerfile
+      dockerfile: services/ingestion/Dockerfile
     restart: unless-stopped
     depends_on:
-      kafka:
-        condition: service_healthy
+      kafka: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
     environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - TOKEN_EXTRACTOR_TOPIC=predsx.tokens.extracted
-      - WS_RAW_TOPIC=predsx.ws.raw
-      - POLYMARKET_WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market
-      - WS_CONNECTIONS=${WS_CONNECTIONS:-4}
-      - METRICS_PORT=8093
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-
-  trade-engine:
-    build:
-      context: ..
-      dockerfile: services/trade-engine/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - REDIS_ADDR=redis:6379
-      - TRADES_LIVE_TOPIC=predsx.trades.live
-      - CONSUMER_GROUP=trade-engine-group
-      - METRICS_PORT=8094
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-
-  orderbook-engine:
-    build:
-      context: ..
-      dockerfile: services/orderbook-engine/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-    environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - ORDERBOOK_UPDATES_TOPIC=predsx.orderbook.updates
-      - CONSUMER_GROUP=orderbook-engine-group
-      - METRICS_PORT=8095
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-
-  price-engine:
-    build:
-      context: ..
-      dockerfile: services/price-engine/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      clickhouse:
-        condition: service_healthy
-    environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - TRADES_LIVE_TOPIC=predsx.trades.live
-      - PRICES_TOPIC=predsx.prices
-      - CONSUMER_GROUP=price-engine-group
-      - REDIS_ADDR=redis:6379
+      - KAFKA_BROKERS=kafka:9092
       - CLICKHOUSE_ADDR=clickhouse:9000
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
-      - METRICS_PORT=8096
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-
-  normalizer:
-    build:
-      context: ..
-      dockerfile: services/normalizer/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      clickhouse:
-        condition: service_healthy
-    environment:
-      - KAFKA_GROUP_ID=predsx-normalizer
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - REDIS_ADDR=redis:6379
-      - WS_RAW_TOPIC=predsx.ws.raw
-      - TRADES_BACKFILL_TOPIC=predsx.trades.backfill
-      - TRADES_LIVE_TOPIC=predsx.trades.live
-      - CLICKHOUSE_ADDR=clickhouse:9000
-      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
-      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
-      - BATCH_SIZE=${BATCH_SIZE:-500}
-      - FLUSH_INTERVAL_MS=${FLUSH_INTERVAL_MS:-100}
-      - METRICS_PORT=8097
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-
-  analyzer:
-    build:
-      context: ..
-      dockerfile: services/analyzer/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      clickhouse:
-        condition: service_healthy
-    environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - TRADES_LIVE_TOPIC=predsx.trades.live
-      - ORDERBOOK_UPDATES_TOPIC=predsx.orderbook.updates
-      - SIGNALS_TOPIC=predsx.signals.live
-      - REDIS_ADDR=redis:6379
-      - CLICKHOUSE_ADDR=clickhouse:9000
-      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
-      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
-      - EMA_ALPHA=${EMA_ALPHA:-0.2}
-      - IMBALANCE_DEPTH=${IMBALANCE_DEPTH:-10}
-      - SPREAD_THRESHOLD=${SPREAD_THRESHOLD:-0.03}
-      - IMBALANCE_THRESHOLD=${IMBALANCE_THRESHOLD:-0.35}
-      - LIQUIDITY_GAP_THRESHOLD=${LIQUIDITY_GAP_THRESHOLD:-0.05}
-      - ARBITRAGE_THRESHOLD=${ARBITRAGE_THRESHOLD:-0.02}
-      - VOLUME_SPIKE_THRESHOLD=${VOLUME_SPIKE_THRESHOLD:-5.0}
-      - MOMENTUM_THRESHOLD=${MOMENTUM_THRESHOLD:-0.05}
-      - HIST_CONTEXT_TTL_SEC=${HIST_CONTEXT_TTL_SEC:-60}
-      - SIGNAL_EMIT_ALL=0
-      - METRICS_PORT=8100
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-
-  stream-aggregator:
-    build:
-      context: ..
-      dockerfile: services/stream-aggregator/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
-    environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - TRADES_LIVE_TOPIC=predsx.trades.live
-      - METRICS_TRADES_TOPIC=predsx.metrics.trades
-      - CLICKHOUSE_ADDR=clickhouse:9000
-      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
-      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
-      - METRICS_PORT=8098
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-
-  indexer:
-    build:
-      context: ..
-      dockerfile: services/indexer/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-    environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - ONCHAIN_TRADES_TOPIC=predsx.trades.onchain
       - POLYGON_RPC_URL=${POLYGON_RPC_URL}
-      - METRICS_PORT=8101
+      - POLYMARKET_WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market
+      - WS_CONNECTIONS=4
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 400M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  backfill:
+  hub-processor:
     build:
       context: ..
-      dockerfile: services/backfill/Dockerfile
+      dockerfile: services/processor/Dockerfile
     restart: unless-stopped
     depends_on:
-      kafka:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
     environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - POSTGRES_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-predsx}?sslmode=disable
-      - TRADES_BACKFILL_TOPIC=predsx.trades.backfill
-      - RATE_LIMIT_MS=250
-      - BACKFILL_WORKERS=4
-      - DATA_RATE_LIMIT_MS=250
-      - CLOB_RATE_LIMIT_MS=250
-      - GAMMA_RATE_LIMIT_MS=250
-      - METRICS_PORT=8099
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-
-  backtester:
-    build:
-      context: ..
-      dockerfile: services/backtester/Dockerfile
-    restart: unless-stopped
-    ports:
-      - "${BACKTEST_PORT:-8082}:8082"
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-    environment:
-      - BACKTEST_PORT=8082
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_ADDR=redis:6379
       - CLICKHOUSE_ADDR=clickhouse:9000
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
-      - METRICS_PORT=8102
+      - BACKTEST_PORT=8082
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 600M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  api:
+  hub-storage:
+    build:
+      context: ..
+      dockerfile: services/storage/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      kafka: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - CLICKHOUSE_ADDR=clickhouse:9000
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
+      - POSTGRES_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-predsx}?sslmode=disable
+    deploy:
+      resources:
+        limits:
+          memory: 400M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  hub-api:
     build:
       context: ..
       dockerfile: services/api/Dockerfile
     restart: unless-stopped
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      clickhouse:
-        condition: service_healthy
     ports:
-      - "8088:${API_PORT:-8081}"
+      - "8088:8088"
+    depends_on:
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
     environment:
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - TRADES_LIVE_TOPIC=predsx.trades.live
-      - ORDERBOOK_UPDATES_TOPIC=predsx.orderbook.updates
-      - PRICES_TOPIC=predsx.prices
-      - SIGNALS_TOPIC=predsx.signals.live
+      - KAFKA_BROKERS=kafka:9092
       - REDIS_ADDR=redis:6379
       - CLICKHOUSE_ADDR=clickhouse:9000
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
-      - API_PORT=${API_PORT:-8081}
-      - METRICS_PORT=8080
+      - API_PORT=8088
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 300M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   postgres_data:
