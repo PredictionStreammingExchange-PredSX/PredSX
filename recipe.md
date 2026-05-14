@@ -53,7 +53,22 @@ This "recipe" outlines the strategic roadmap for evolving PredSX into a world-cl
     1.  **On-Chain Listener:** Build an `indexer-service` that listens directly to Polygon block events for Polymarket's CTF (Conditional Token Framework) contract.
     2.  **Wallet Mapping:** Extract the `maker` and `taker` addresses from the raw transaction logs and correlate them with the CLOB trade events.
     3.  **Whale Alerts:** Emit a `whale_alert` signal to Kafka when a known large wallet (or a trade over a massive USD threshold) enters a position.
-    4.  **Shadow Trading:** Add logic to the `analyzer` to automatically copy-trade the most profitable wallets.
+
+### 🎮 Dish No. 7: Virtual Paper Trading & Copytrade Simulator
+**Goal:** Practice trading and test whale-following strategies with zero risk.
+*   **Ingredients:** Redis (Virtual Balances), Processor (Copy Logic), Postgres (Trade History).
+*   **The Process:**
+    1.  **Shadow Engine:** Extend the `Processor-Hub` to listen for trades from your "Whale Watchlist."
+    2.  **Auto-Execute:** When a watched whale buys, the system automatically creates a "Mirror Trade" in a virtual database for your account.
+    3.  **Real-time PnL:** Use the live price feed to update your virtual profit/loss instantly, just like a real exchange.
+
+### 🏆 Dish No. 8: The Alpha Leaderboard (Social Insight)
+**Goal:** Rank every wallet on Polymarket by profitability to find the best traders to follow.
+*   **Ingredients:** ClickHouse (Historical Trades), SQL Window Functions, Frontend Tables.
+*   **The Process:**
+    1.  **Profit Calculation:** Run a ClickHouse query that aggregates every trade for a specific wallet to calculate its total ROI (Return on Investment).
+    2.  **The Leaderboard:** Create an API endpoint `/v1/leaderboard` that returns the top 50 most profitable wallets.
+    3.  **Follow Button:** In the UI, allow the user to click "Follow" on a leader to add them to their automated Copytrade Simulator (Dish No. 7).
 
 ---
 
@@ -65,6 +80,7 @@ This "recipe" outlines the strategic roadmap for evolving PredSX into a world-cl
 | **Phase 2** | Mobile & Automation | Trade anywhere, automatically. |
 | **Phase 3** | ML & Intelligence | The smartest bot in the market. |
 | **Phase 4** | On-Chain & Whales | See the players behind the trades. |
+| **Phase 5** | Social & Copytrading | Follow the smart money automatically. |
 
 ---
 *Stay hungry. Keep cooking.* 🚀

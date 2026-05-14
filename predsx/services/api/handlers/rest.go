@@ -339,7 +339,7 @@ func (h *APIHandler) GetMarketTrades(w http.ResponseWriter, r *http.Request) {
 	meta := h.getMarketMetadata(ctx, id)
 	conditionID := meta["condition_id"]
 
-	query := "SELECT data FROM events_raw WHERE type='predsx.trades' AND market_id IN (?, ?)"
+	query := "SELECT trade_id, price, size, side, token, timestamp FROM trades WHERE market_id IN (?, ?)"
 	args := []interface{}{id, conditionID}
 	if fromOk {
 		query += " AND timestamp >= ?"
@@ -369,12 +369,19 @@ func (h *APIHandler) GetMarketTrades(w http.ResponseWriter, r *http.Request) {
 		Scan(dest ...interface{}) error
 	}); ok {
 		for sqlRows.Next() {
-			var dataStr string
-			if err := sqlRows.Scan(&dataStr); err == nil {
-				var parsed map[string]interface{}
-				if json.Unmarshal([]byte(dataStr), &parsed) == nil {
-					trades = append(trades, parsed)
-				}
+			var tID, side, token string
+			var price, size float64
+			var ts time.Time
+			if err := sqlRows.Scan(&tID, &price, &size, &side, &token, &ts); err == nil {
+				trades = append(trades, map[string]interface{}{
+					"trade_id":  tID,
+					"market_id": id,
+					"price":     price,
+					"size":      size,
+					"side":      side,
+					"token":     token,
+					"timestamp": ts.UnixMilli(),
+				})
 			}
 		}
 	}
@@ -623,16 +630,12 @@ type Trade struct {
 func (h *APIHandler) GetDebugTrades(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	query := "SELECT data FROM events WHERE type='predsx.trades' ORDER BY timestamp DESC LIMIT 50"
+	query := "SELECT trade_id, market_id, price, size, side, timestamp FROM trades ORDER BY timestamp DESC LIMIT 50"
 	rows, err := h.ClickHouse.Query(ctx, query)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("clickhouse query error: %v", err), http.StatusInternalServerError)
 		return
 	}
-	// The returned `rows` is of type `driver.Rows` since Clickhouse Interface returns `any`.
-	// Let's assert it and iterate
-
-	// Close resources as best effort
 	defer func() {
 		if closer, ok := rows.(interface{ Close() error }); ok {
 			closer.Close()
@@ -640,26 +643,23 @@ func (h *APIHandler) GetDebugTrades(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	trades := make([]map[string]interface{}, 0)
-
-	// Try standard sql rows iteration
 	if sqlRows, ok := rows.(interface {
 		Next() bool
 		Scan(dest ...interface{}) error
 	}); ok {
 		for sqlRows.Next() {
-			var dataStr string
-			if err := sqlRows.Scan(&dataStr); err == nil {
-				var parsedData map[string]interface{}
-				if err := json.Unmarshal([]byte(dataStr), &parsedData); err == nil {
-					// Build the structure required by the prompt
-					trade := map[string]interface{}{
-						"market_id": parsedData["market_id"],
-						"price":     parsedData["price"],
-						"size":      parsedData["size"],
-						"timestamp": parsedData["timestamp"],
-					}
-					trades = append(trades, trade)
-				}
+			var tID, mID, side string
+			var price, size float64
+			var ts time.Time
+			if err := sqlRows.Scan(&tID, &mID, &price, &size, &side, &ts); err == nil {
+				trades = append(trades, map[string]interface{}{
+					"trade_id":  tID,
+					"market_id": mID,
+					"price":     price,
+					"size":      size,
+					"side":      side,
+					"timestamp": ts.UnixMilli(),
+				})
 			}
 		}
 	}

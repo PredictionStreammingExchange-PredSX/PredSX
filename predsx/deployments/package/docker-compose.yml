@@ -1,0 +1,189 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_HEAP_OPTS: "-Xms256M -Xmx256M"
+      KAFKA_LOG_RETENTION_HOURS: 2
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:latest
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    deploy:
+      resources:
+        limits:
+          memory: 100M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-predsx}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    restart: unless-stopped
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    environment:
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  hub-discovery:
+    image: predsx-discovery:latest
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - postgres
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - POSTGRES_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-predsx}?sslmode=disable
+      - REDIS_ADDR=redis:6379
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  hub-ingestion:
+    image: predsx-ingestion:latest
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - clickhouse
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - CLICKHOUSE_ADDR=clickhouse:9000
+      - POLYMARKET_WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+
+  hub-processor:
+    image: predsx-processor:latest
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - redis
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_ADDR=redis:6379
+      - CLICKHOUSE_ADDR=clickhouse:9000
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  hub-storage:
+    image: predsx-storage:latest
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - clickhouse
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - CLICKHOUSE_ADDR=clickhouse:9000
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+
+  hub-api:
+    image: predsx-api:latest
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    depends_on:
+      - kafka
+      - redis
+      - clickhouse
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - REDIS_ADDR=redis:6379
+      - CLICKHOUSE_ADDR=clickhouse:9000
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  frontend:
+    image: predsx-frontend:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - hub-api
+    environment:
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8088/stream
+      - NEXT_PUBLIC_API_URL=http://localhost:8088
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+volumes:
+  postgres_data:
+  clickhouse_data:

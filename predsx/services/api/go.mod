@@ -60,6 +60,9 @@ replace github.com/predsx/predsx/libs/retry-utils => ../../libs/retry-utils
 replace github.com/predsx/predsx/libs/kafka-client => ../../libs/kafka-client
 
 replace github.com/predsx/predsx/libs/schemas => ../../libs/schemas
+
 replace github.com/predsx/predsx/libs/postgres-client => ../../libs/postgres-client
+
 replace github.com/predsx/predsx/libs/websocket-client => ../../libs/websocket-client
+
 replace github.com/predsx/predsx/libs/crypto => ../../libs/crypto

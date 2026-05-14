@@ -113,7 +113,7 @@ func startNormalizerComponent(ctx context.Context, svc *service.BaseService, bro
 	go func() {
 		for {
 			raw, _ := wsConsumer.Fetch(ctx)
-			processWebsocketEvent(ctx, rdb, producer, raw, func(e schemas.NormalizedEvent) {
+			processWebsocketEvent(ctx, ch, rdb, producer, raw, func(e schemas.NormalizedEvent) {
 				mu.Lock()
 				buffer = append(buffer, e)
 				mu.Unlock()
@@ -156,6 +156,7 @@ func startNormalizerComponent(ctx context.Context, svc *service.BaseService, bro
 }
 
 func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
+	// Raw events for audit/debug (3 day retention)
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS events_raw (
 			event_id    String,
@@ -169,6 +170,24 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 		ORDER BY (market_id, timestamp)
 		TTL timestamp + INTERVAL 3 DAY;
 	`)
+
+	// Detailed trades for analytics (7 day retention)
+	ch.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS trades (
+			trade_id    String,
+			market_id   String,
+			token       String,
+			price       Float64,
+			size        Float64,
+			side        LowCardinality(String),
+			timestamp   DateTime64(3)
+		) ENGINE = MergeTree()
+		PARTITION BY toDate(timestamp)
+		ORDER BY (market_id, timestamp)
+		TTL timestamp + INTERVAL 7 DAY;
+	`)
+
+	// Market metadata (Permanent)
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS market_metadata (
 			market_id String, slug String, title String, question String, condition_id String,
@@ -176,20 +195,92 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 			end_time DateTime64(3), outcomes String, created_at DateTime64(3), raw String
 		) ENGINE = MergeTree() ORDER BY (market_id, created_at)
 	`)
+
+	// Orderbook history (2 day retention)
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS orderbook_history (
 			market_id String, token String, timestamp DateTime64(3),
 			best_bid Float64, best_ask Float64, mid Float64, spread Float64, bids String, asks String
-		) ENGINE = MergeTree() ORDER BY (market_id, timestamp)
+		) ENGINE = MergeTree() 
+		ORDER BY (market_id, timestamp)
+		TTL timestamp + INTERVAL 2 DAY;
 	`)
+
+	// OnChain trades (14 day retention)
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS onchain_trades (
 			tx_hash String, maker String, taker String, token_id String, amount String, timestamp DateTime64(3)
-		) ENGINE = MergeTree() ORDER BY (tx_hash, timestamp)
+		) ENGINE = MergeTree() 
+		ORDER BY (tx_hash, timestamp)
+		TTL timestamp + INTERVAL 14 DAY;
+	`)
+
+	// --- RESEARCH AGGREGATIONS (Materialized Views) ---
+
+	// 1-Minute OHLCV Candles
+	ch.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS price_history_1m (
+			market_id String,
+			timestamp DateTime,
+			open Float64,
+			high Float64,
+			low Float64,
+			close Float64,
+			volume Float64,
+			trade_count UInt32
+		) ENGINE = SummingMergeTree()
+		ORDER BY (market_id, timestamp);
+	`)
+
+	ch.Exec(ctx, `
+		CREATE MATERIALIZED VIEW IF NOT EXISTS v_price_history_1m
+		TO price_history_1m
+		AS SELECT
+			market_id,
+			toStartOfMinute(timestamp) AS timestamp,
+			argMin(price, timestamp) AS open,
+			max(price) AS high,
+			min(price) AS low,
+			argMax(price, timestamp) AS close,
+			sum(size * price) AS volume,
+			count() AS trade_count
+		FROM trades
+		GROUP BY market_id, timestamp;
+	`)
+
+	// 1-Hour OHLCV Candles (Permanent Research Data)
+	ch.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS price_history_1h (
+			market_id String,
+			timestamp DateTime,
+			open Float64,
+			high Float64,
+			low Float64,
+			close Float64,
+			volume Float64,
+			trade_count UInt32
+		) ENGINE = SummingMergeTree()
+		ORDER BY (market_id, timestamp);
+	`)
+
+	ch.Exec(ctx, `
+		CREATE MATERIALIZED VIEW IF NOT EXISTS v_price_history_1h
+		TO price_history_1h
+		AS SELECT
+			market_id,
+			toStartOfHour(timestamp) AS timestamp,
+			argMin(price, timestamp) AS open,
+			max(price) AS high,
+			min(price) AS low,
+			argMax(price, timestamp) AS close,
+			sum(size * price) AS volume,
+			count() AS trade_count
+		FROM trades
+		GROUP BY market_id, timestamp;
 	`)
 }
 
-func processWebsocketEvent(ctx context.Context, rdb redisclient.Interface, p *kafkaclient.TypedProducer[schemas.TradeEvent], raw schemas.RawWebsocketEvent, onNormalized func(schemas.NormalizedEvent)) {
+func processWebsocketEvent(ctx context.Context, ch clickhouse.Interface, rdb redisclient.Interface, p *kafkaclient.TypedProducer[schemas.TradeEvent], raw schemas.RawWebsocketEvent, onNormalized func(schemas.NormalizedEvent)) {
 	var payload map[string]interface{}
 	json.Unmarshal(raw.Payload, &payload)
 	eType := getString(payload, "event_type", "type")
@@ -246,6 +337,10 @@ func processWebsocketEvent(ctx context.Context, rdb redisclient.Interface, p *ka
 			}
 			p.Publish(ctx, marketID, trade)
 
+			// Insert into dedicated trades table
+			ch.Exec(ctx, `INSERT INTO trades (trade_id, market_id, token, price, size, side, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				trade.TradeID, trade.MarketID, trade.Token, trade.Price, trade.Size, trade.Side, trade.Timestamp)
+
 			tradePayload, _ := json.Marshal(trade)
 			onNormalized(schemas.NormalizedEvent{
 				EventID:   trade.TradeID,
@@ -281,6 +376,11 @@ func processWebsocketEvent(ctx context.Context, rdb redisclient.Interface, p *ka
 			Version:   schemas.VersionV1,
 		}
 		p.Publish(ctx, marketID, trade)
+
+		// Insert into dedicated trades table
+		ch.Exec(ctx, `INSERT INTO trades (trade_id, market_id, token, price, size, side, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			trade.TradeID, trade.MarketID, trade.Token, trade.Price, trade.Size, trade.Side, trade.Timestamp)
+
 		onNormalized(schemas.NormalizedEvent{
 			EventID: trade.TradeID, MarketID: marketID, EventType: "predsx.trades", Data: raw.Payload, Timestamp: ts,
 		})
