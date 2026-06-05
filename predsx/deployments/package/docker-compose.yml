@@ -88,9 +88,9 @@ services:
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
 
   hub-discovery:
     image: predsx-discovery:latest
@@ -228,12 +228,12 @@ services:
 
   frontend:
     image: predsx-frontend:latest
+    build:
+      context: ../../../PredSX-Stat
+      dockerfile: Dockerfile
     restart: unless-stopped
     ports:
       - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8088
-      - NEXT_PUBLIC_WS_URL=ws://localhost:8088/stream
     depends_on:
       - hub-api
     deploy:

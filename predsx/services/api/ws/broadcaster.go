@@ -9,6 +9,7 @@ import (
 	kafkaclient "github.com/predsx/predsx/libs/kafka-client"
 	"github.com/predsx/predsx/libs/logger"
 	"github.com/predsx/predsx/libs/schemas"
+	"github.com/segmentio/kafka-go"
 )
 
 // Envelope wraps every outbound WebSocket message with a typed discriminator
@@ -53,7 +54,7 @@ func StartKafkaBroadcaster(ctx context.Context, hub *Hub, kafkaBrokers string, l
 
 	// Trades
 	go func() {
-		c := kafkaclient.NewTypedConsumer[schemas.TradeEvent](brokers, tradesTopic, "api-ws-trades", log)
+		c := kafkaclient.NewTypedConsumer[schemas.TradeEvent](brokers, tradesTopic, "api-ws-trades", log, kafka.LastOffset)
 		defer c.Close()
 		log.Info("trade consumer started", "topic", tradesTopic)
 		for {
@@ -73,7 +74,7 @@ func StartKafkaBroadcaster(ctx context.Context, hub *Hub, kafkaBrokers string, l
 
 	// Orderbook
 	go func() {
-		c := kafkaclient.NewTypedConsumer[schemas.OrderbookUpdate](brokers, orderbookTopic, "api-ws-orderbook", log)
+		c := kafkaclient.NewTypedConsumer[schemas.OrderbookUpdate](brokers, orderbookTopic, "api-ws-orderbook", log, kafka.LastOffset)
 		defer c.Close()
 		log.Info("orderbook consumer started", "topic", orderbookTopic)
 		for {
@@ -93,7 +94,7 @@ func StartKafkaBroadcaster(ctx context.Context, hub *Hub, kafkaBrokers string, l
 
 	// Prices
 	go func() {
-		c := kafkaclient.NewTypedConsumer[schemas.PriceUpdate](brokers, pricesTopic, "api-ws-prices", log)
+		c := kafkaclient.NewTypedConsumer[schemas.PriceUpdate](brokers, pricesTopic, "api-ws-prices", log, kafka.LastOffset)
 		defer c.Close()
 		log.Info("price consumer started", "topic", pricesTopic)
 		for {
@@ -113,7 +114,7 @@ func StartKafkaBroadcaster(ctx context.Context, hub *Hub, kafkaBrokers string, l
 
 	// Signals
 	go func() {
-		c := kafkaclient.NewTypedConsumer[schemas.SignalEvent](brokers, signalsTopic, "api-ws-signals", log)
+		c := kafkaclient.NewTypedConsumer[schemas.SignalEvent](brokers, signalsTopic, "api-ws-signals", log, kafka.LastOffset)
 		defer c.Close()
 		log.Info("signals consumer started", "topic", signalsTopic)
 		for {

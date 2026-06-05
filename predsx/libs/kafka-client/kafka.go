@@ -78,13 +78,17 @@ type TypedConsumer[T any] struct {
 	log    logger.Interface
 }
 
-func NewTypedConsumer[T any](brokers []string, topic string, groupID string, log logger.Interface) *TypedConsumer[T] {
+func NewTypedConsumer[T any](brokers []string, topic string, groupID string, log logger.Interface, startOffset ...int64) *TypedConsumer[T] {
+	offset := kafka.FirstOffset
+	if len(startOffset) > 0 {
+		offset = startOffset[0]
+	}
 	return &TypedConsumer[T]{
 		reader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers:     brokers,
 			Topic:       topic,
 			GroupID:     groupID,
-			StartOffset: kafka.FirstOffset,
+			StartOffset: offset,
 		}),
 		log: log,
 	}
