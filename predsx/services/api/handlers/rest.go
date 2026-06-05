@@ -2,18 +2,18 @@ package handlers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
-
 	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/predsx/predsx/libs/clickhouse-client"
+	clickhouse "github.com/predsx/predsx/libs/clickhouse-client"
 	redisclient "github.com/predsx/predsx/libs/redis-client"
 )
 
@@ -49,8 +49,31 @@ func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limit := parseLimit(getQuery(r, "limit", ""), 50, 200)
-	offset := parseOffset(getQuery(r, "offset", ""))
 	status := strings.ToUpper(getQuery(r, "status", ""))
+
+	// Cursor-based pagination: cursor encodes the current offset opaquely.
+	var offset int
+	if cursor := getQuery(r, "cursor", ""); cursor != "" {
+		offset = decodeCursor(cursor)
+	} else {
+		offset = parseOffset(getQuery(r, "offset", ""))
+	}
+
+	type marketsPage struct {
+		Data       []map[string]interface{} `json:"data"`
+		NextCursor string                   `json:"next_cursor,omitempty"`
+		HasMore    bool                     `json:"has_more"`
+	}
+
+	cacheKey := fmt.Sprintf("cache:markets:%s:%s:%d:%d", exchange, status, limit, offset)
+	var cached marketsPage
+	if h.cacheGetJSON(ctx, cacheKey, &cached) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "HIT")
+		json.NewEncoder(w).Encode(cached)
+		return
+	}
+
 	results := h.getActivityRankedMarkets(ctx, exchange, status, limit, offset)
 	if len(results) < limit {
 		results = append(results, h.getRecentMarkets(ctx, exchange, status, limit-len(results), results)...)
@@ -59,8 +82,15 @@ func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
 		results = []map[string]interface{}{}
 	}
 
+	hasMore := len(results) == limit
+	page := marketsPage{Data: results, HasMore: hasMore}
+	if hasMore {
+		page.NextCursor = encodeCursor(offset + limit)
+	}
+
+	h.cacheSetJSON(ctx, cacheKey, page, 30*time.Second)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(results)
+	json.NewEncoder(w).Encode(page)
 }
 
 func (h *APIHandler) getActivityRankedMarkets(ctx context.Context, exchange string, status string, limit int, offset int) []map[string]interface{} {
@@ -270,6 +300,12 @@ func (h *APIHandler) GetMarket(w http.ResponseWriter, r *http.Request) {
 
 	meta := h.getMarketMetadata(ctx, id)
 	resp := h.buildMarketDetail(ctx, id, meta)
+
+	// Embed 24h stats so callers don't need a separate /stats request.
+	if stats := h.fetchMarketStats(ctx, id, meta["condition_id"]); stats != nil {
+		resp["stats_24h"] = stats
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
@@ -1076,6 +1112,16 @@ func (h *APIHandler) proxyGET(w http.ResponseWriter, r *http.Request, baseURL, p
 func (h *APIHandler) GetMarketSummary(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := mux.Vars(r)["id"]
+
+	cacheKey := "cache:summary:" + id
+	var cachedSummary map[string]interface{}
+	if h.cacheGetJSON(ctx, cacheKey, &cachedSummary) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "HIT")
+		json.NewEncoder(w).Encode(cachedSummary)
+		return
+	}
+
 	meta := h.getMarketMetadata(ctx, id)
 	conditionID := meta["condition_id"]
 
@@ -1135,6 +1181,7 @@ func (h *APIHandler) GetMarketSummary(w http.ResponseWriter, r *http.Request) {
 		"timestamp":    time.Now().UnixMilli(),
 	}
 
+	h.cacheSetJSON(ctx, cacheKey, summary, 10*time.Second)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(summary)
 }
@@ -1153,6 +1200,93 @@ func toFloat(v interface{}) float64 {
 	return 0
 }
 
+// cacheGetJSON tries to unmarshal a cached JSON value from Redis into dest.
+func (h *APIHandler) cacheGetJSON(ctx context.Context, key string, dest interface{}) bool {
+	raw, err := h.Redis.Get(ctx, key).Result()
+	if err != nil || raw == "" {
+		return false
+	}
+	return json.Unmarshal([]byte(raw), dest) == nil
+}
+
+// cacheSetJSON marshals v and stores it in Redis with the given TTL.
+func (h *APIHandler) cacheSetJSON(ctx context.Context, key string, v interface{}, ttl time.Duration) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	h.Redis.Set(ctx, key, string(b), ttl)
+}
+
+// encodeCursor base64-encodes an integer offset for opaque cursor pagination.
+func encodeCursor(offset int) string {
+	return base64.URLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
+}
+
+// decodeCursor reverses encodeCursor.
+func decodeCursor(cursor string) int {
+	b, err := base64.URLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(string(b))
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// fetchMarketStats returns 24-hour OHLCV stats for a market. Returns nil on error.
+func (h *APIHandler) fetchMarketStats(ctx context.Context, marketID, conditionID string) map[string]interface{} {
+	cutoff := time.Now().Add(-24 * time.Hour)
+	query := `
+		SELECT
+			sum(volume)              AS volume_24h,
+			sum(trade_count)         AS trades_24h,
+			argMin(close, timestamp) AS open_price,
+			argMax(close, timestamp) AS close_price,
+			min(close)               AS low_24h,
+			max(close)               AS high_24h
+		FROM price_history_1m
+		WHERE market_id IN (?, ?) AND timestamp >= ?
+	`
+	rows, err := h.ClickHouse.Query(ctx, query, marketID, conditionID, cutoff)
+	if err != nil {
+		return nil
+	}
+	defer func() {
+		if closer, ok := rows.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+	}()
+
+	var volume float64
+	var trades uint64
+	var openPrice, closePrice, low, high float64
+	if sqlRows, ok := rows.(interface {
+		Next() bool
+		Scan(dest ...interface{}) error
+	}); ok {
+		if sqlRows.Next() {
+			sqlRows.Scan(&volume, &trades, &openPrice, &closePrice, &low, &high)
+		}
+	}
+
+	priceChangePct := 0.0
+	if openPrice > 0 {
+		priceChangePct = (closePrice - openPrice) / openPrice * 100
+	}
+	return map[string]interface{}{
+		"volume_24h":       volume,
+		"trades_24h":       trades,
+		"open_price":       openPrice,
+		"close_price":      closePrice,
+		"low_24h":          low,
+		"high_24h":         high,
+		"price_change_pct": priceChangePct,
+	}
+}
+
 // SearchMarkets searches markets by title or question using a case-insensitive substring match.
 // GET /v1/markets/search?q=trump&limit=20&exchange=polymarket&status=ACTIVE
 func (h *APIHandler) SearchMarkets(w http.ResponseWriter, r *http.Request) {
@@ -1166,6 +1300,15 @@ func (h *APIHandler) SearchMarkets(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(getQuery(r, "limit", ""), 20, 100)
 	exchange := strings.ToLower(getQuery(r, "exchange", "polymarket"))
 	status := strings.ToUpper(getQuery(r, "status", ""))
+
+	cacheKey := fmt.Sprintf("cache:search:%s:%s:%s:%d", q, exchange, status, limit)
+	var cachedResults []map[string]interface{}
+	if h.cacheGetJSON(ctx, cacheKey, &cachedResults) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "HIT")
+		json.NewEncoder(w).Encode(cachedResults)
+		return
+	}
 
 	query := `
 		SELECT market_id, slug, title, question, condition_id, status, exchange, event_id,
@@ -1224,6 +1367,7 @@ func (h *APIHandler) SearchMarkets(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.cacheSetJSON(ctx, cacheKey, results, 30*time.Second)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(results)
 }
@@ -1237,6 +1381,15 @@ func (h *APIHandler) GetTopMarkets(w http.ResponseWriter, r *http.Request) {
 	by := strings.ToLower(getQuery(r, "by", "volume"))
 	limit := parseLimit(getQuery(r, "limit", ""), 10, 50)
 	period := getQuery(r, "period", "24h")
+
+	cacheKey := fmt.Sprintf("cache:markets:top:%s:%s:%d", by, period, limit)
+	var cached []map[string]interface{}
+	if h.cacheGetJSON(ctx, cacheKey, &cached) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "HIT")
+		json.NewEncoder(w).Encode(cached)
+		return
+	}
 
 	var cutoff time.Time
 	switch period {
@@ -1300,6 +1453,7 @@ func (h *APIHandler) GetTopMarkets(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.cacheSetJSON(ctx, cacheKey, results, 15*time.Second)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(results)
 }
@@ -1309,62 +1463,27 @@ func (h *APIHandler) GetTopMarkets(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) GetMarketStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := mux.Vars(r)["id"]
-	meta := h.getMarketMetadata(ctx, id)
-	conditionID := meta["condition_id"]
 
-	cutoff := time.Now().Add(-24 * time.Hour)
-	query := `
-		SELECT
-			sum(volume)              AS volume_24h,
-			sum(trade_count)         AS trades_24h,
-			argMin(close, timestamp) AS open_price,
-			argMax(close, timestamp) AS close_price,
-			min(close)               AS low_24h,
-			max(close)               AS high_24h
-		FROM price_history_1m
-		WHERE market_id IN (?, ?) AND timestamp >= ?
-	`
-	rows, err := h.ClickHouse.Query(ctx, query, id, conditionID, cutoff)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("query error: %v", err), http.StatusInternalServerError)
+	cacheKey := "cache:stats:" + id
+	var cached map[string]interface{}
+	if h.cacheGetJSON(ctx, cacheKey, &cached) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "HIT")
+		json.NewEncoder(w).Encode(cached)
 		return
 	}
-	defer func() {
-		if closer, ok := rows.(interface{ Close() error }); ok {
-			closer.Close()
-		}
-	}()
 
-	var volume float64
-	var trades uint64
-	var openPrice, closePrice, low, high float64
-
-	if sqlRows, ok := rows.(interface {
-		Next() bool
-		Scan(dest ...interface{}) error
-	}); ok {
-		if sqlRows.Next() {
-			sqlRows.Scan(&volume, &trades, &openPrice, &closePrice, &low, &high)
-		}
+	meta := h.getMarketMetadata(ctx, id)
+	stats := h.fetchMarketStats(ctx, id, meta["condition_id"])
+	if stats == nil {
+		stats = map[string]interface{}{}
 	}
+	stats["market_id"] = id
+	stats["timestamp"] = time.Now().UnixMilli()
 
-	priceChangePct := 0.0
-	if openPrice > 0 {
-		priceChangePct = (closePrice - openPrice) / openPrice * 100
-	}
-
+	h.cacheSetJSON(ctx, cacheKey, stats, 30*time.Second)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"market_id":        id,
-		"volume_24h":       volume,
-		"trades_24h":       trades,
-		"open_price":       openPrice,
-		"close_price":      closePrice,
-		"low_24h":          low,
-		"high_24h":         high,
-		"price_change_pct": priceChangePct,
-		"timestamp":        time.Now().UnixMilli(),
-	})
+	json.NewEncoder(w).Encode(stats)
 }
 
 // GetBatchPrices returns live prices for up to 100 market IDs in one call.
@@ -1405,6 +1524,109 @@ func (h *APIHandler) GetBatchPrices(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+// GetCandles returns OHLCV candles in TradingView UDF format.
+// GET /v1/markets/{id}/candles?resolution=1&from=1704067200&to=1704153600
+// resolution: 1 → 1-minute bars, 60 → 1-hour bars. from/to are Unix seconds.
+func (h *APIHandler) GetCandles(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := mux.Vars(r)["id"]
+
+	resolution := getQuery(r, "resolution", "1")
+	var table string
+	switch resolution {
+	case "60", "1h":
+		table = "price_history_1h"
+		resolution = "60"
+	default:
+		table = "price_history_1m"
+		resolution = "1"
+	}
+
+	var from, to time.Time
+	if f := getQuery(r, "from", ""); f != "" {
+		if i, err := strconv.ParseInt(f, 10, 64); err == nil {
+			from = time.Unix(i, 0)
+		}
+	}
+	if t := getQuery(r, "to", ""); t != "" {
+		if i, err := strconv.ParseInt(t, 10, 64); err == nil {
+			to = time.Unix(i, 0)
+		}
+	}
+	if from.IsZero() {
+		from = time.Now().Add(-24 * time.Hour)
+	}
+	if to.IsZero() {
+		to = time.Now()
+	}
+
+	limit := parseLimit(getQuery(r, "limit", ""), 1000, 5000)
+	meta := h.getMarketMetadata(ctx, id)
+	conditionID := meta["condition_id"]
+
+	query := fmt.Sprintf(`
+		SELECT timestamp, open, high, low, close, volume
+		FROM %s
+		WHERE market_id IN (?, ?) AND timestamp >= ? AND timestamp <= ?
+		ORDER BY timestamp ASC
+		LIMIT ?
+	`, table)
+
+	rows, err := h.ClickHouse.Query(ctx, query, id, conditionID, from, to, limit)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"s": "error", "errmsg": err.Error()})
+		return
+	}
+	defer func() {
+		if closer, ok := rows.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+	}()
+
+	var ts []int64
+	var opens, highs, lows, closes, volumes []float64
+
+	if sqlRows, ok := rows.(interface {
+		Next() bool
+		Scan(dest ...interface{}) error
+	}); ok {
+		for sqlRows.Next() {
+			var t time.Time
+			var o, hi, lo, c, v float64
+			if sqlRows.Scan(&t, &o, &hi, &lo, &c, &v) == nil {
+				ts = append(ts, t.Unix())
+				opens = append(opens, o)
+				highs = append(highs, hi)
+				lows = append(lows, lo)
+				closes = append(closes, c)
+				volumes = append(volumes, v)
+			}
+		}
+	}
+
+	if ts == nil {
+		ts = []int64{}
+		opens = []float64{}
+		highs = []float64{}
+		lows = []float64{}
+		closes = []float64{}
+		volumes = []float64{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"s":          "ok",
+		"t":          ts,
+		"o":          opens,
+		"h":          highs,
+		"l":          lows,
+		"c":          closes,
+		"v":          volumes,
+		"resolution": resolution,
+	})
 }
 
 // GetRelatedMarkets returns other markets in the same event as the given market.

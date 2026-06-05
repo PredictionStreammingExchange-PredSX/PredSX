@@ -2,6 +2,7 @@ package ws
 
 import (
 	"bytes"
+	"encoding/json"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -9,17 +10,10 @@ import (
 )
 
 const (
-	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
-
-	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer.
-	maxMessageSize = 512
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
+	maxMessageSize = 4096
 )
 
 var (
@@ -27,27 +21,32 @@ var (
 	space   = []byte{' '}
 )
 
+// clientMsg is the shape of messages sent from browser → server.
+type clientMsg struct {
+	Action  string   `json:"action"`  // "subscribe" | "unsubscribe"
+	Markets []string `json:"markets"` // list of market IDs
+}
+
 // Client is a middleman between the websocket connection and the hub.
 type Client struct {
-	hub *Hub
-	// The websocket connection.
-	conn *websocket.Conn
-	// Buffered channel of outbound messages.
-	send chan []byte
-	log  logger.Interface
+	hub           *Hub
+	conn          *websocket.Conn
+	send          chan []byte
+	subscriptions map[string]bool // empty = receive all markets
+	log           logger.Interface
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn, log logger.Interface) *Client {
 	return &Client{
-		hub:  hub,
-		conn: conn,
-		send: make(chan []byte, 256),
-		log:  log.With("component", "ws_client"),
+		hub:           hub,
+		conn:          conn,
+		send:          make(chan []byte, 256),
+		subscriptions: make(map[string]bool),
+		log:           log.With("component", "ws_client"),
 	}
 }
 
 // readPump pumps messages from the websocket connection to the hub.
-// The application runs readPump in a per-connection goroutine.
 func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
@@ -64,15 +63,22 @@ func (c *Client) readPump() {
 			}
 			break
 		}
-		// For this application, we don't expect many incoming messages from clients, 
-		// but we process them to keep the connection clean.
 		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
-		c.log.Debug("received message from client", "message", string(message))
+
+		var cm clientMsg
+		if json.Unmarshal(message, &cm) == nil {
+			switch cm.Action {
+			case "subscribe":
+				c.hub.Subscribe(c, cm.Markets)
+			case "unsubscribe":
+				// Empty slice = receive everything again
+				c.hub.Subscribe(c, []string{})
+			}
+		}
 	}
 }
 
 // writePump pumps messages from the hub to the websocket connection.
-// A goroutine running writePump is started for each connection.
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -84,7 +90,6 @@ func (c *Client) writePump() {
 		case message, ok := <-c.send:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				// The hub closed the channel.
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
@@ -95,7 +100,6 @@ func (c *Client) writePump() {
 			}
 			w.Write(message)
 
-			// Add queued chat messages to the current websocket message.
 			n := len(c.send)
 			for i := 0; i < n; i++ {
 				w.Write(newline)

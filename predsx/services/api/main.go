@@ -70,19 +70,21 @@ func main() {
 		})
 
 		// Real-time Kafka → WebSocket broadcaster
-		// Streams live trades, orderbook updates, and price updates to all connected clients.
 		go ws.StartKafkaBroadcaster(ctx, hub, kafkaBrokers, svc.Logger)
 
-		// Debug Endpoints (No Auth, No Prefix)
-		r.HandleFunc("/debug/markets", h.GetDebugMarkets).Methods("GET")
-		r.HandleFunc("/debug/markets/{id}", h.GetDebugMarket).Methods("GET")
-		r.HandleFunc("/debug/trades", h.GetDebugTrades).Methods("GET")
-		r.HandleFunc("/debug/orderbook/{id}", h.GetDebugOrderbook).Methods("GET")
-		r.HandleFunc("/debug/signals", h.GetDebugSignals).Methods("GET")
-		r.HandleFunc("/debug/signals/{id}", h.GetDebugSignalsByMarket).Methods("GET")
+		// Debug Endpoints — gated by X-Debug-Token header (set DEBUG_TOKEN env var)
+		debug := r.PathPrefix("/debug").Subrouter()
+		debug.Use(middleware.DebugAuth)
+		debug.HandleFunc("/markets", h.GetDebugMarkets).Methods("GET")
+		debug.HandleFunc("/markets/{id}", h.GetDebugMarket).Methods("GET")
+		debug.HandleFunc("/trades", h.GetDebugTrades).Methods("GET")
+		debug.HandleFunc("/orderbook/{id}", h.GetDebugOrderbook).Methods("GET")
+		debug.HandleFunc("/signals", h.GetDebugSignals).Methods("GET")
+		debug.HandleFunc("/signals/{id}", h.GetDebugSignalsByMarket).Methods("GET")
 
-		// Protected API Routes
+		// Protected API Routes — rate-limited at 60 req/min per IP
 		api := r.PathPrefix("/v1").Subrouter()
+		api.Use(middleware.RateLimit(rdb, svc.Logger))
 		// api.Use(middleware.Auth(svc.Logger))
 
 		api.HandleFunc("/markets", h.GetMarkets).Methods("GET")
@@ -97,6 +99,7 @@ func main() {
 		api.HandleFunc("/markets/{id}/trades", h.GetMarketTrades).Methods("GET")
 		api.HandleFunc("/markets/{id}/summary", h.GetMarketSummary).Methods("GET")
 		api.HandleFunc("/markets/{id}/stats", h.GetMarketStats).Methods("GET")
+		api.HandleFunc("/markets/{id}/candles", h.GetCandles).Methods("GET")
 		api.HandleFunc("/markets/{id}/positions", h.GetMarketPositions).Methods("GET")
 		api.HandleFunc("/markets/{id}/related", h.GetRelatedMarkets).Methods("GET")
 		api.HandleFunc("/positions", h.GetPositions).Methods("GET")

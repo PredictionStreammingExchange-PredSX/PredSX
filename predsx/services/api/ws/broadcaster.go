@@ -67,7 +67,7 @@ func StartKafkaBroadcaster(ctx context.Context, hub *Hub, kafkaBrokers string, l
 				log.Error("trade consumer fetch error", "error", err)
 				continue
 			}
-			hub.Broadcast(marshal("trade", evt))
+			hub.BroadcastToMarket(marshal("trade", evt), evt.MarketID)
 		}
 	}()
 
@@ -87,7 +87,7 @@ func StartKafkaBroadcaster(ctx context.Context, hub *Hub, kafkaBrokers string, l
 				log.Error("orderbook consumer fetch error", "error", err)
 				continue
 			}
-			hub.Broadcast(marshal("orderbook", evt))
+			hub.BroadcastToMarket(marshal("orderbook", evt), evt.MarketID)
 		}
 	}()
 
@@ -107,7 +107,7 @@ func StartKafkaBroadcaster(ctx context.Context, hub *Hub, kafkaBrokers string, l
 				log.Error("price consumer fetch error", "error", err)
 				continue
 			}
-			hub.Broadcast(marshal("price", evt))
+			hub.BroadcastToMarket(marshal("price", evt), evt.MarketID)
 		}
 	}()
 
@@ -127,7 +127,7 @@ func StartKafkaBroadcaster(ctx context.Context, hub *Hub, kafkaBrokers string, l
 				log.Error("signals consumer fetch error", "error", err)
 				continue
 			}
-			hub.Broadcast(marshal("signal", evt))
+			hub.BroadcastToMarket(marshal("signal", evt), evt.MarketID)
 		}
 	}()
 }

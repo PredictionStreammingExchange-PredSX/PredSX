@@ -14,6 +14,8 @@ type Interface interface {
 	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
 	SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.BoolCmd
 	Del(ctx context.Context, keys ...string) *redis.IntCmd
+	Incr(ctx context.Context, key string) *redis.IntCmd
+	Expire(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd
 	Scan(ctx context.Context, cursor uint64, match string, count int64) *redis.ScanCmd
 	SAdd(ctx context.Context, key string, members ...interface{}) *redis.IntCmd
 	SMembers(ctx context.Context, key string) *redis.StringSliceCmd
@@ -63,4 +65,12 @@ func (c *Client) SMembers(ctx context.Context, key string) *redis.StringSliceCmd
 
 func (c *Client) SIsMember(ctx context.Context, key string, member interface{}) *redis.BoolCmd {
 	return c.Client.SIsMember(ctx, key, member)
+}
+
+func (c *Client) Incr(ctx context.Context, key string) *redis.IntCmd {
+	return c.Client.Incr(ctx, key)
+}
+
+func (c *Client) Expire(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd {
+	return c.Client.Expire(ctx, key, expiration)
 }
