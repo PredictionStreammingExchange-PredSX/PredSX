@@ -18,8 +18,8 @@ docker build -t predsx-storage:latest -f services/storage/Dockerfile .
 REM 5. API
 docker build -t predsx-api:latest -f services/api/Dockerfile .
 
-REM 6. Frontend
-docker build -t predsx-frontend:latest -f ../PredSX-Stat/Dockerfile ../PredSX-Stat
+REM 6. Frontend (Force no-cache to ensure Smart IP code is picked up)
+docker build --no-cache -t predsx-frontend:latest -f ../PredSX-Stat/Dockerfile ../PredSX-Stat
 
 echo [2/4] Exporting Images to .tar files...
 if not exist "deployments\package" mkdir "deployments\package"

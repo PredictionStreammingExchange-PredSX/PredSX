@@ -92,6 +92,7 @@ func main() {
 		api.HandleFunc("/markets/{id}/price", h.GetPrice).Methods("GET")
 		api.HandleFunc("/markets/{id}/price-history", h.GetMarketPriceHistory).Methods("GET")
 		api.HandleFunc("/markets/{id}/trades", h.GetMarketTrades).Methods("GET")
+		api.HandleFunc("/markets/{id}/summary", h.GetMarketSummary).Methods("GET")
 		api.HandleFunc("/markets/{id}/positions", h.GetMarketPositions).Methods("GET")
 		api.HandleFunc("/positions", h.GetPositions).Methods("GET")
 		api.HandleFunc("/positions/closed", h.GetClosedPositions).Methods("GET")

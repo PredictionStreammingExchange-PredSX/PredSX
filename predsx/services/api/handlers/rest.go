@@ -32,6 +32,8 @@ func (h *APIHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"status":    "ok",
 		"service":   "predsx-api",
+		"project":   "PredSX Trading Platform",
+		"instance":  "Production-VPS",
 		"timestamp": time.Now().Unix(),
 	}
 	json.NewEncoder(w).Encode(resp)
@@ -405,11 +407,12 @@ func (h *APIHandler) GetMarketPriceHistory(w http.ResponseWriter, r *http.Reques
 	to, toOk := parseTimeParam(getQuery(r, "to", ""))
 	resolution := strings.ToLower(getQuery(r, "resolution", "1m"))
 	table := "price_history_1m"
-	if resolution == "5m" {
+	switch resolution {
+	case "5m":
 		table = "price_history_5m"
-	} else if resolution == "1h" {
+	case "1h":
 		table = "price_history_1h"
-	} else if resolution == "1s" {
+	case "1s":
 		table = "market_metrics"
 	}
 	meta := h.getMarketMetadata(ctx, id)
@@ -1054,4 +1057,84 @@ func (h *APIHandler) proxyGET(w http.ResponseWriter, r *http.Request, baseURL, p
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
+}
+// GetMarketSummary returns a unified view of a market including price, latest signals, and stats.
+func (h *APIHandler) GetMarketSummary(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := mux.Vars(r)["id"]
+	meta := h.getMarketMetadata(ctx, id)
+	conditionID := meta["condition_id"]
+
+	// 1. Get Price & Orderbook from Redis
+	var price float64
+	var bestBid, bestAsk float64
+	priceStr, _ := h.Redis.Get(ctx, fmt.Sprintf("price:%s", id)).Result()
+	if priceStr != "" {
+		fmt.Sscanf(priceStr, "%f", &price)
+	}
+
+	obStr, _ := h.Redis.Get(ctx, fmt.Sprintf("orderbook:%s", id)).Result()
+	if obStr != "" {
+		var ob map[string]interface{}
+		if json.Unmarshal([]byte(obStr), &ob) == nil {
+			bestBid = toFloat(ob["best_bid"])
+			bestAsk = toFloat(ob["best_ask"])
+		}
+	}
+
+	// 2. Get Latest Signals from ClickHouse
+	signals := make([]map[string]interface{}, 0)
+	sigQuery := "SELECT type, value, severity, timestamp FROM events_raw WHERE type LIKE 'predsx.signal.%' AND market_id = ? ORDER BY timestamp DESC LIMIT 5"
+	sigRows, err := h.ClickHouse.Query(ctx, sigQuery, id)
+	if err == nil {
+		if sqlRows, ok := sigRows.(interface {
+			Next() bool
+			Scan(dest ...interface{}) error
+		}); ok {
+			for sqlRows.Next() {
+				var sType, sSev string
+				var sVal float64
+				var sTs time.Time
+				if sqlRows.Scan(&sType, &sVal, &sSev, &sTs) == nil {
+					signals = append(signals, map[string]interface{}{
+						"type":      sType,
+						"value":     sVal,
+						"severity":  sSev,
+						"timestamp": sTs.UnixMilli(),
+					})
+				}
+			}
+		}
+	}
+
+	// 3. Assemble Unified Response
+	summary := map[string]interface{}{
+		"market_id":    id,
+		"condition_id": conditionID,
+		"title":        meta["title"],
+		"price":        price,
+		"best_bid":     bestBid,
+		"best_ask":     bestAsk,
+		"spread":       bestAsk - bestBid,
+		"signals":      signals,
+		"status":       meta["status"],
+		"timestamp":    time.Now().UnixMilli(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(summary)
+}
+
+func toFloat(v interface{}) float64 {
+	switch t := v.(type) {
+	case float64:
+		return t
+	case json.Number:
+		f, _ := t.Float64()
+		return f
+	case string:
+		f, _ := strconv.ParseFloat(t, 64)
+		return f
+	}
+	return 0
 }
