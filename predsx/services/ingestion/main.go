@@ -43,7 +43,7 @@ func main() {
 		chDatabase := config.GetEnv("CLICKHOUSE_DB", "default")
 
 		// --- WEBSOCKET STREAM CONFIG ---
-		wsURL := config.GetEnv("POLYMARKET_WS_URL", "wss://clob.polymarket.com/ws")
+		wsURL := config.GetEnv("POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/market")
 		numConns := config.GetEnvInt("WS_CONNECTIONS", 4)
 		tokenTopic := config.GetEnv("TOKEN_EXTRACTOR_TOPIC", "predsx.tokens.extracted")
 		wsRawTopic := config.GetEnv("WS_RAW_TOPIC", "predsx.ws.raw")
@@ -51,7 +51,7 @@ func main() {
 		// --- INDEXER CONFIG ---
 		onChainTopic := config.GetEnv("ONCHAIN_TRADES_TOPIC", "predsx.trades.onchain")
 		// Using Public RPC with Rate-Limit protection as requested
-		rpcURL := config.GetEnv("POLYGON_RPC_URL", "https://polygon-mainnet.public.blastapi.io")
+		rpcURL := config.GetEnv("POLYGON_RPC_URL", "https://polygon-rpc.com")
 
 		// --- AGGREGATOR CONFIG ---
 		tradesTopic := config.GetEnv("TRADES_LIVE_TOPIC", "predsx.trades.live")

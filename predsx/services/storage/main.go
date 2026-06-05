@@ -43,11 +43,18 @@ func main() {
 			User:     chUser,
 			Password: chPassword,
 			Database: chDatabase,
-			MaxConns: 10,
 		}, svc.Logger)
 		if err != nil {
 			return fmt.Errorf("clickhouse connect failed: %w", err)
 		}
+
+		// Test connection immediately
+		if err := ch.Ping(ctx); err != nil {
+			return fmt.Errorf("clickhouse ping failed: %w", err)
+		}
+		fmt.Println("clickhouse connection verified")
+
+		ensureSchemas(ctx, ch)
 
 		pg, _ := postgres.NewClient(ctx, pgConn, 5, svc.Logger)
 		rdb := redisclient.NewClient(redisclient.Options{Addr: redisAddr}, svc.Logger)
@@ -84,7 +91,6 @@ func startNormalizerComponent(ctx context.Context, svc *service.BaseService, bro
 	wsConsumer := kafkaclient.NewTypedConsumer[schemas.RawWebsocketEvent]([]string{brokers}, wsTopic, "storage-norm-ws", svc.Logger)
 	bfConsumer := kafkaclient.NewTypedConsumer[schemas.HistoricalEvent]([]string{brokers}, backfillTopic, "storage-norm-bf", svc.Logger)
 	obConsumer := kafkaclient.NewTypedConsumer[schemas.OrderbookUpdate]([]string{brokers}, obTopic, "storage-norm-ob", svc.Logger)
-	disConsumer := kafkaclient.NewTypedConsumer[schemas.MarketDiscovered]([]string{brokers}, discoveryTopic, "storage-norm-dis", svc.Logger)
 	oncConsumer := kafkaclient.NewTypedConsumer[schemas.OnChainTradeEvent]([]string{brokers}, onChainTopic, "storage-norm-onc", svc.Logger)
 
 	svc.Logger.Info("normalizer component started")
@@ -140,7 +146,10 @@ func startNormalizerComponent(ctx context.Context, svc *service.BaseService, bro
 	}()
 
 	// Metadata Persistence
+	disGroupID := config.GetEnv("MARKET_DISCOVERY_GROUP", "storage-norm-dis-v10")
+	disConsumer := kafkaclient.NewTypedConsumer[schemas.MarketDiscovered]([]string{brokers}, discoveryTopic, disGroupID, svc.Logger)
 	go func() {
+		fmt.Printf("Metadata consumer started on group: %s\n", disGroupID)
 		for {
 			evt, _ := disConsumer.Fetch(ctx)
 			persistMarketMetadata(ctx, ch, evt)
@@ -156,7 +165,10 @@ func startNormalizerComponent(ctx context.Context, svc *service.BaseService, bro
 }
 
 func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
+	fmt.Println("initializing clickhouse schemas...")
+
 	// Raw events for audit/debug (3 day retention)
+	fmt.Println("checking events_raw table...")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS events_raw (
 			event_id    String,
@@ -172,6 +184,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	`)
 
 	// Detailed trades for analytics (7 day retention)
+	fmt.Println("checking trades table...")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS trades (
 			trade_id    String,
@@ -188,6 +201,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	`)
 
 	// Market metadata (Permanent)
+	fmt.Println("checking market_metadata table...")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS market_metadata (
 			market_id String, slug String, title String, question String, condition_id String,
@@ -197,6 +211,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	`)
 
 	// Orderbook history (2 day retention)
+	fmt.Println("checking orderbook_history table...")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS orderbook_history (
 			market_id String, token String, timestamp DateTime64(3),
@@ -207,6 +222,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	`)
 
 	// OnChain trades (14 day retention)
+	fmt.Println("checking onchain_trades table...")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS onchain_trades (
 			tx_hash String, maker String, taker String, token_id String, amount String, timestamp DateTime64(3)
@@ -218,6 +234,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	// --- RESEARCH AGGREGATIONS (Materialized Views) ---
 
 	// 1-Minute OHLCV Candles
+	fmt.Println("checking price_history_1m table...")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS price_history_1m (
 			market_id String,
@@ -232,6 +249,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 		ORDER BY (market_id, timestamp);
 	`)
 
+	fmt.Println("checking v_price_history_1m view...")
 	ch.Exec(ctx, `
 		CREATE MATERIALIZED VIEW IF NOT EXISTS v_price_history_1m
 		TO price_history_1m
@@ -249,6 +267,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	`)
 
 	// 1-Hour OHLCV Candles (Permanent Research Data)
+	fmt.Println("checking price_history_1h table...")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS price_history_1h (
 			market_id String,
@@ -263,6 +282,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 		ORDER BY (market_id, timestamp);
 	`)
 
+	fmt.Println("checking v_price_history_1h view...")
 	ch.Exec(ctx, `
 		CREATE MATERIALIZED VIEW IF NOT EXISTS v_price_history_1h
 		TO price_history_1h
@@ -278,6 +298,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 		FROM trades
 		GROUP BY market_id, timestamp;
 	`)
+	fmt.Println("clickhouse schemas initialized successfully")
 }
 
 func processWebsocketEvent(ctx context.Context, ch clickhouse.Interface, rdb redisclient.Interface, p *kafkaclient.TypedProducer[schemas.TradeEvent], raw schemas.RawWebsocketEvent, onNormalized func(schemas.NormalizedEvent)) {
@@ -431,8 +452,12 @@ func persistMarketMetadata(ctx context.Context, ch clickhouse.Interface, evt sch
 		title = evt.Question
 	}
 	outcomes, _ := json.Marshal(evt.Outcomes)
-	ch.Exec(ctx, `INSERT INTO market_metadata (market_id, slug, title, question, condition_id, status, exchange, event_id, start_time, end_time, outcomes, created_at, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	fmt.Printf("Saving market to ClickHouse: %s (%s)\n", evt.ID, evt.Slug)
+	err := ch.Exec(ctx, `INSERT INTO market_metadata (market_id, slug, title, question, condition_id, status, exchange, event_id, start_time, end_time, outcomes, created_at, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		evt.ID, evt.Slug, title, evt.Question, evt.ConditionID, evt.Status, evt.Exchange, evt.EventID, evt.StartTime, evt.EndTime, string(outcomes), time.Now(), evt.Raw)
+	if err != nil {
+		fmt.Printf("ERROR saving market %s: %v\n", evt.ID, err)
+	}
 }
 
 // --- BACKFILL COMPONENT ---

@@ -1,7 +1,7 @@
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
-    restart: unless-stopped
+    restart: always
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -17,7 +17,7 @@ services:
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
-    restart: unless-stopped
+    restart: always
     depends_on:
       - zookeeper
     environment:
@@ -41,7 +41,7 @@ services:
 
   redis:
     image: redis:latest
-    restart: unless-stopped
+    restart: always
     command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
     deploy:
       resources:
@@ -55,7 +55,7 @@ services:
 
   postgres:
     image: postgres:16
-    restart: unless-stopped
+    restart: always
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
@@ -74,7 +74,7 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
-    restart: unless-stopped
+    restart: always
     volumes:
       - clickhouse_data:/var/lib/clickhouse
     environment:
@@ -85,72 +85,129 @@ services:
       resources:
         limits:
           memory: 1G
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   hub-discovery:
     image: predsx-discovery:latest
-    restart: unless-stopped
+    restart: always
     depends_on:
       kafka:
         condition: service_started
       postgres:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     environment:
       - KAFKA_BROKERS=kafka:9092
       - POSTGRES_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-predsx}?sslmode=disable
       - REDIS_ADDR=redis:6379
+      - CLICKHOUSE_ADDR=clickhouse:9000
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
     deploy:
       resources:
         limits:
           memory: 200M
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   hub-ingestion:
     image: predsx-ingestion:latest
-    restart: unless-stopped
+    restart: always
     depends_on:
       kafka:
         condition: service_started
+      clickhouse:
+        condition: service_healthy
     environment:
       - KAFKA_BROKERS=kafka:9092
       - CLICKHOUSE_ADDR=clickhouse:9000
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
     deploy:
       resources:
         limits:
           memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   hub-processor:
     image: predsx-processor:latest
-    restart: unless-stopped
+    restart: always
     depends_on:
       kafka:
         condition: service_started
       redis:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     environment:
       - KAFKA_BROKERS=kafka:9092
       - REDIS_ADDR=redis:6379
       - CLICKHOUSE_ADDR=clickhouse:9000
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
     deploy:
       resources:
         limits:
           memory: 400M
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   hub-storage:
     image: predsx-storage:latest
-    restart: unless-stopped
+    restart: always
     depends_on:
       kafka:
         condition: service_started
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
       - KAFKA_BROKERS=kafka:9092
       - CLICKHOUSE_ADDR=clickhouse:9000
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
+      - POSTGRES_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-predsx}?sslmode=disable
+      - REDIS_ADDR=redis:6379
     deploy:
       resources:
         limits:
           memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   hub-api:
     image: predsx-api:latest
-    restart: unless-stopped
+    restart: always
     ports:
       - "8088:8088"
     depends_on:
@@ -158,20 +215,34 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     environment:
       - KAFKA_BROKERS=kafka:9092
       - REDIS_ADDR=redis:6379
       - CLICKHOUSE_ADDR=clickhouse:9000
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
     deploy:
       resources:
         limits:
           memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8088/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   frontend:
     image: predsx-frontend:latest
-    restart: unless-stopped
+    restart: always
     ports:
       - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://77.42.19.244:8088
+      - NEXT_PUBLIC_WS_URL=ws://77.42.19.244:8088/stream
     depends_on:
       - hub-api
     deploy:

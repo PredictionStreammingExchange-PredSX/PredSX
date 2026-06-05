@@ -55,6 +55,9 @@ func (h *APIHandler) GetMarkets(w http.ResponseWriter, r *http.Request) {
 	if len(results) < limit {
 		results = append(results, h.getRecentMarkets(ctx, exchange, status, limit-len(results), results)...)
 	}
+	if results == nil {
+		results = []map[string]interface{}{}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(results)
@@ -71,6 +74,7 @@ func (h *APIHandler) getActivityRankedMarkets(ctx context.Context, exchange stri
 		queryLimit = 500
 	}
 
+	results := make([]map[string]interface{}, 0)
 	rows, err := h.ClickHouse.Query(ctx, `
 		SELECT market_id, max(timestamp) AS last_seen
 		FROM price_history_1m
@@ -80,7 +84,7 @@ func (h *APIHandler) getActivityRankedMarkets(ctx context.Context, exchange stri
 	`, queryLimit)
 	if err != nil {
 		h.Logger.Error("activity market query failed", "error", err)
-		return nil
+		return results
 	}
 	defer func() {
 		if closer, ok := rows.(interface{ Close() error }); ok {
@@ -88,7 +92,7 @@ func (h *APIHandler) getActivityRankedMarkets(ctx context.Context, exchange stri
 		}
 	}()
 
-	results := make([]map[string]interface{}, 0, target)
+	results = make([]map[string]interface{}, 0, target)
 	seen := make(map[string]struct{})
 
 	if sqlRows, ok := rows.(interface {
@@ -159,11 +163,11 @@ func (h *APIHandler) getRecentMarkets(ctx context.Context, exchange string, stat
 	var filters []string
 	var args []interface{}
 	if exchange != "" {
-		filters = append(filters, "exchange = ?")
+		filters = append(filters, "LOWER(exchange) = LOWER(?)")
 		args = append(args, exchange)
 	}
 	if status != "" {
-		filters = append(filters, "status = ?")
+		filters = append(filters, "LOWER(status) = LOWER(?)")
 		args = append(args, status)
 	}
 
@@ -184,10 +188,11 @@ func (h *APIHandler) getRecentMarkets(ctx context.Context, exchange string, stat
 	}
 	args = append(args, scanLimit)
 
+	results := make([]map[string]interface{}, 0)
 	rows, err := h.ClickHouse.Query(ctx, query, args...)
 	if err != nil {
 		h.Logger.Error("recent market query failed", "error", err)
-		return nil
+		return results
 	}
 	defer func() {
 		if closer, ok := rows.(interface{ Close() error }); ok {
@@ -195,7 +200,7 @@ func (h *APIHandler) getRecentMarkets(ctx context.Context, exchange string, stat
 		}
 	}()
 
-	results := make([]map[string]interface{}, 0, limit)
+	results = make([]map[string]interface{}, 0, limit)
 	if sqlRows, ok := rows.(interface {
 		Next() bool
 		Scan(dest ...interface{}) error
@@ -418,7 +423,7 @@ func (h *APIHandler) GetMarketPriceHistory(w http.ResponseWriter, r *http.Reques
 	meta := h.getMarketMetadata(ctx, id)
 	conditionID := meta["condition_id"]
 
-	query := fmt.Sprintf("SELECT timestamp, trade_count, volume, avg_price FROM %s WHERE market_id IN (?, ?)", table)
+	query := fmt.Sprintf("SELECT timestamp, trade_count, volume, close FROM %s WHERE market_id IN (?, ?)", table)
 	args := []interface{}{id, conditionID}
 	if fromOk {
 		query += " AND timestamp >= ?"
@@ -724,6 +729,9 @@ func (h *APIHandler) GetDebugSignals(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	signalType := r.URL.Query().Get("type")
 	signals := h.collectSignals(ctx, "", signalType)
+	if signals == nil {
+		signals = []map[string]interface{}{}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(signals)
@@ -736,6 +744,9 @@ func (h *APIHandler) GetDebugSignalsByMarket(w http.ResponseWriter, r *http.Requ
 	signalType := r.URL.Query().Get("type")
 
 	signals := h.collectSignals(ctx, id, signalType)
+	if signals == nil {
+		signals = []map[string]interface{}{}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(signals)
@@ -748,6 +759,9 @@ func (h *APIHandler) GetSignalsByMarket(w http.ResponseWriter, r *http.Request) 
 	signalType := r.URL.Query().Get("type")
 
 	signals := h.collectSignals(ctx, id, signalType)
+	if signals == nil {
+		signals = []map[string]interface{}{}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(signals)
@@ -1137,4 +1151,324 @@ func toFloat(v interface{}) float64 {
 		return f
 	}
 	return 0
+}
+
+// SearchMarkets searches markets by title or question using a case-insensitive substring match.
+// GET /v1/markets/search?q=trump&limit=20&exchange=polymarket&status=ACTIVE
+func (h *APIHandler) SearchMarkets(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := strings.TrimSpace(getQuery(r, "q", ""))
+	if q == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{})
+		return
+	}
+	limit := parseLimit(getQuery(r, "limit", ""), 20, 100)
+	exchange := strings.ToLower(getQuery(r, "exchange", "polymarket"))
+	status := strings.ToUpper(getQuery(r, "status", ""))
+
+	query := `
+		SELECT market_id, slug, title, question, condition_id, status, exchange, event_id,
+		       start_time, end_time, outcomes
+		FROM market_metadata
+		WHERE (positionCaseInsensitive(title, ?) > 0 OR positionCaseInsensitive(question, ?) > 0)
+	`
+	args := []interface{}{q, q}
+	if exchange != "" {
+		query += " AND lower(exchange) = lower(?)"
+		args = append(args, exchange)
+	}
+	if status != "" {
+		query += " AND upper(status) = upper(?)"
+		args = append(args, status)
+	}
+	query += " ORDER BY created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := h.ClickHouse.Query(ctx, query, args...)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("query error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if closer, ok := rows.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+	}()
+
+	results := make([]map[string]interface{}, 0)
+	if sqlRows, ok := rows.(interface {
+		Next() bool
+		Scan(dest ...interface{}) error
+	}); ok {
+		for sqlRows.Next() {
+			var marketID, slug, title, question, conditionID, statusVal, exchangeVal, eventID, outcomes string
+			var startTime, endTime time.Time
+			if err := sqlRows.Scan(&marketID, &slug, &title, &question, &conditionID, &statusVal, &exchangeVal, &eventID, &startTime, &endTime, &outcomes); err != nil {
+				continue
+			}
+			meta := map[string]string{
+				"market_id":    marketID,
+				"slug":         slug,
+				"title":        title,
+				"question":     question,
+				"condition_id": conditionID,
+				"status":       statusVal,
+				"exchange":     exchangeVal,
+				"event_id":     eventID,
+				"outcomes":     outcomes,
+				"start_time":   startTime.Format(time.RFC3339),
+				"end_time":     endTime.Format(time.RFC3339),
+			}
+			results = append(results, h.buildMarketSummary(ctx, marketID, meta))
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
+}
+
+// GetTopMarkets returns the top N markets ranked by volume or trade count over a time period.
+// GET /v1/markets/top?by=volume&limit=10&period=24h
+// by: volume (default), trades
+// period: 1h, 24h (default), 7d
+func (h *APIHandler) GetTopMarkets(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	by := strings.ToLower(getQuery(r, "by", "volume"))
+	limit := parseLimit(getQuery(r, "limit", ""), 10, 50)
+	period := getQuery(r, "period", "24h")
+
+	var cutoff time.Time
+	switch period {
+	case "1h":
+		cutoff = time.Now().Add(-1 * time.Hour)
+	case "7d":
+		cutoff = time.Now().Add(-7 * 24 * time.Hour)
+	default:
+		cutoff = time.Now().Add(-24 * time.Hour)
+	}
+
+	var orderCol string
+	switch by {
+	case "trades":
+		orderCol = "total_trades"
+	default:
+		orderCol = "total_volume"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT market_id, sum(volume) AS total_volume, sum(trade_count) AS total_trades
+		FROM price_history_1m
+		WHERE timestamp >= ?
+		GROUP BY market_id
+		ORDER BY %s DESC
+		LIMIT ?
+	`, orderCol)
+
+	rows, err := h.ClickHouse.Query(ctx, query, cutoff, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("query error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if closer, ok := rows.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+	}()
+
+	results := make([]map[string]interface{}, 0)
+	if sqlRows, ok := rows.(interface {
+		Next() bool
+		Scan(dest ...interface{}) error
+	}); ok {
+		for sqlRows.Next() {
+			var marketID string
+			var totalVolume float64
+			var totalTrades uint64
+			if err := sqlRows.Scan(&marketID, &totalVolume, &totalTrades); err != nil {
+				continue
+			}
+			canonicalID := h.resolveCanonicalMarketID(ctx, marketID)
+			if canonicalID == "" {
+				canonicalID = marketID
+			}
+			meta := h.getMarketMetadata(ctx, canonicalID)
+			item := h.buildMarketSummary(ctx, canonicalID, meta)
+			item["volume_period"] = totalVolume
+			item["trades_period"] = totalTrades
+			results = append(results, item)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
+}
+
+// GetMarketStats returns 24h OHLCV stats and price change % for a market.
+// GET /v1/markets/{id}/stats
+func (h *APIHandler) GetMarketStats(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := mux.Vars(r)["id"]
+	meta := h.getMarketMetadata(ctx, id)
+	conditionID := meta["condition_id"]
+
+	cutoff := time.Now().Add(-24 * time.Hour)
+	query := `
+		SELECT
+			sum(volume)              AS volume_24h,
+			sum(trade_count)         AS trades_24h,
+			argMin(close, timestamp) AS open_price,
+			argMax(close, timestamp) AS close_price,
+			min(close)               AS low_24h,
+			max(close)               AS high_24h
+		FROM price_history_1m
+		WHERE market_id IN (?, ?) AND timestamp >= ?
+	`
+	rows, err := h.ClickHouse.Query(ctx, query, id, conditionID, cutoff)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("query error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if closer, ok := rows.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+	}()
+
+	var volume float64
+	var trades uint64
+	var openPrice, closePrice, low, high float64
+
+	if sqlRows, ok := rows.(interface {
+		Next() bool
+		Scan(dest ...interface{}) error
+	}); ok {
+		if sqlRows.Next() {
+			sqlRows.Scan(&volume, &trades, &openPrice, &closePrice, &low, &high)
+		}
+	}
+
+	priceChangePct := 0.0
+	if openPrice > 0 {
+		priceChangePct = (closePrice - openPrice) / openPrice * 100
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"market_id":        id,
+		"volume_24h":       volume,
+		"trades_24h":       trades,
+		"open_price":       openPrice,
+		"close_price":      closePrice,
+		"low_24h":          low,
+		"high_24h":         high,
+		"price_change_pct": priceChangePct,
+		"timestamp":        time.Now().UnixMilli(),
+	})
+}
+
+// GetBatchPrices returns live prices for up to 100 market IDs in one call.
+// GET /v1/prices?ids=id1,id2,id3
+func (h *APIHandler) GetBatchPrices(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	idsParam := strings.TrimSpace(getQuery(r, "ids", ""))
+	if idsParam == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{})
+		return
+	}
+
+	ids := strings.Split(idsParam, ",")
+	const maxIDs = 100
+	if len(ids) > maxIDs {
+		ids = ids[:maxIDs]
+	}
+
+	result := make(map[string]interface{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		raw, err := h.Redis.Get(ctx, "live:price:"+id).Result()
+		if err != nil || raw == "" {
+			result[id] = nil
+			continue
+		}
+		var parsed map[string]interface{}
+		if json.Unmarshal([]byte(raw), &parsed) == nil {
+			result[id] = parsed
+		} else {
+			result[id] = nil
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// GetRelatedMarkets returns other markets in the same event as the given market.
+// GET /v1/markets/{id}/related?limit=20
+func (h *APIHandler) GetRelatedMarkets(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := mux.Vars(r)["id"]
+
+	meta := h.getMarketMetadata(ctx, id)
+	eventID := meta["event_id"]
+	if eventID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{})
+		return
+	}
+
+	limit := parseLimit(getQuery(r, "limit", ""), 20, 100)
+	query := `
+		SELECT market_id, slug, title, question, condition_id, status, exchange, event_id,
+		       start_time, end_time, outcomes
+		FROM market_metadata
+		WHERE event_id = ? AND market_id != ?
+		ORDER BY created_at DESC
+		LIMIT ?
+	`
+	rows, err := h.ClickHouse.Query(ctx, query, eventID, id, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("query error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if closer, ok := rows.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+	}()
+
+	results := make([]map[string]interface{}, 0)
+	if sqlRows, ok := rows.(interface {
+		Next() bool
+		Scan(dest ...interface{}) error
+	}); ok {
+		for sqlRows.Next() {
+			var marketID, slug, title, question, conditionID, statusVal, exchangeVal, eventIDVal, outcomes string
+			var startTime, endTime time.Time
+			if err := sqlRows.Scan(&marketID, &slug, &title, &question, &conditionID, &statusVal, &exchangeVal, &eventIDVal, &startTime, &endTime, &outcomes); err != nil {
+				continue
+			}
+			m := map[string]string{
+				"market_id":    marketID,
+				"slug":         slug,
+				"title":        title,
+				"question":     question,
+				"condition_id": conditionID,
+				"status":       statusVal,
+				"exchange":     exchangeVal,
+				"event_id":     eventIDVal,
+				"outcomes":     outcomes,
+				"start_time":   startTime.Format(time.RFC3339),
+				"end_time":     endTime.Format(time.RFC3339),
+			}
+			results = append(results, h.buildMarketSummary(ctx, marketID, m))
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
 }
