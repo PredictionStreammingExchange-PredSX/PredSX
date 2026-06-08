@@ -235,21 +235,6 @@ services:
       retries: 3
       start_period: 20s
 
-  frontend:
-    image: predsx-frontend:latest
-    restart: always
-    ports:
-      - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://77.42.19.244:8088
-      - NEXT_PUBLIC_WS_URL=ws://77.42.19.244:8088/stream
-    depends_on:
-      - hub-api
-    deploy:
-      resources:
-        limits:
-          memory: 400M
-
 volumes:
   postgres_data:
   clickhouse_data:

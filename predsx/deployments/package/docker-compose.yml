@@ -98,6 +98,9 @@ services:
       context: ../..
       dockerfile: services/discovery/Dockerfile
     restart: unless-stopped
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     depends_on:
       kafka:
         condition: service_started
@@ -124,6 +127,9 @@ services:
       context: ../..
       dockerfile: services/ingestion/Dockerfile
     restart: unless-stopped
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     depends_on:
       kafka:
         condition: service_started
@@ -225,21 +231,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-
-  frontend:
-    image: predsx-frontend:latest
-    build:
-      context: ../../../PredSX-Stat
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    depends_on:
-      - hub-api
-    deploy:
-      resources:
-        limits:
-          memory: 400M
 
 volumes:
   postgres_data:

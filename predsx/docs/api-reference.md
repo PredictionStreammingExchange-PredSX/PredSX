@@ -24,6 +24,10 @@ Returns service status.
 ### `GET /metrics`
 Prometheus metrics scrape endpoint.
 
+### `POST /graphql`
+Placeholder stub — always returns `{"data": {"message": "GraphQL API placeholder"}}`.
+Not a real GraphQL implementation yet.
+
 ---
 
 ## Markets
@@ -164,57 +168,128 @@ Returns `{"s": "error", "errmsg": "..."}` on query failure.
 ---
 
 ### `GET /v1/markets/{id}/orderbook`
-Live orderbook snapshot from Redis.
+Live orderbook snapshot, served verbatim from Redis (`predsx:orderbook:{id}`).
+Returns `404 orderbook not found` if no snapshot is cached for this market.
 
 ---
 
 ### `GET /v1/markets/{id}/price`
-Current live price from Redis (`predsx:price:{id}`).
+Current live price, served verbatim from Redis (`predsx:price:{id}`).
+Returns `404 price not found` if no snapshot is cached for this market.
 
 ---
 
 ### `GET /v1/markets/{id}/price-history`
-Historical price series from ClickHouse.
+Historical price/volume time series from ClickHouse candle tables.
+
+**Query params**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `resolution` | `1m` | Bucket size: `1s` (reads `market_metrics`), `1m`, `5m`, `1h` |
+| `from` / `to` | — | Optional time range filters |
+| `limit` | `500` | Max rows (cap: 20000), most-recent first |
+
+**Response** — array of `{ "timestamp", "trade_count", "volume", "avg_price" }`
+(`avg_price` is the bucket's `close` value from the underlying OHLC table).
 
 ---
 
 ### `GET /v1/markets/{id}/trades`
-Recent trades for a market.
+Recent trade history for a market.
+
+**Query params**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `limit` | `100` | Max results (cap: 5000) |
+| `from` / `to` | — | Optional time range filters |
+| `wallet` | — | If set, proxies to the Polymarket Data API `/trades` filtered by `user`/`market` instead of querying locally |
+| `source` | `local` (or `data-api` if `wallet` is set) | Forces local ClickHouse query vs. Data API proxy |
+
+**Response (local source)** — array of
+`{ "trade_id", "market_id", "price", "size", "side", "token", "timestamp" }`
+queried from ClickHouse `trades`, matched on the market's ID or condition ID.
 
 ---
 
 ### `GET /v1/markets/{id}/positions`
-Open positions for a market.
+Open positions for this specific market. Proxies to the Polymarket Data API
+`/market-positions` endpoint with `market={id}` (and `user={wallet}` if the
+`wallet` query param is supplied).
 
 ---
 
 ### `GET /v1/markets/{id}/related`
-Related markets.
+Other markets belonging to the same event.
+
+**Query params**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `limit` | `20` | Max results (cap: 100) |
+
+Looks up the market's `event_id` in `market_metadata`, then returns sibling
+markets (excluding itself) as summary objects. Returns `[]` if the market has
+no `event_id`.
 
 ---
 
 ### `GET /v1/markets/{id}/signals`
-Signals for a specific market.
+Latest trading signals generated for this market.
+
+**Query params**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `type` | — | Filter to a specific signal type |
+
+Scans Redis keys matching `signal:latest:*` for this market and returns the
+most recent signal of each type found.
 
 ---
 
 ## Prices & Events
 
 ### `GET /v1/prices`
-Batch live prices. Pass `ids=id1,id2,...` as query param.
+Batch live prices for up to 100 markets in a single round trip — avoids N
+separate `/price` calls.
+
+**Query params**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `ids` | — | Comma-separated market IDs, e.g. `?ids=123,456,789` (max 100; extras are dropped) |
+
+**Response** — object keyed by market ID, e.g. `{ "123": { ...price snapshot... }, "456": null }`.
+A value of `null` means no live price is currently cached for that ID
+(Redis key `live:price:{id}` missing or unparsable).
+
+---
 
 ### `GET /v1/events`
-List events.
+List prediction-market events. Pure passthrough proxy to the Polymarket Gamma
+API `/events` endpoint (query params are forwarded as-is). Only `exchange=polymarket`
+is supported; any other value returns `400 unsupported exchange`.
 
 ---
 
 ## Positions
 
 ### `GET /v1/positions`
-All open positions.
+All open positions for a wallet. Proxies to the Polymarket Data API `/positions`.
+
+**Query params**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `wallet` | — | **Required.** Wallet address to look up (forwarded as `user`) |
+
+Returns `400 wallet is required` if omitted.
 
 ### `GET /v1/positions/closed`
-Closed positions.
+Closed/settled positions for a wallet. Proxies to the Polymarket Data API
+`/closed-positions`. Same `wallet` (required) query param as above.
 
 ---
 

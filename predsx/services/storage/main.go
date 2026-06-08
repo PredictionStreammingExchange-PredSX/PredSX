@@ -234,6 +234,20 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	// --- RESEARCH AGGREGATIONS (Materialized Views) ---
 
 	// 1-Minute OHLCV Candles
+	// 1-Second real-time metrics (2 day retention)
+	fmt.Println("checking market_metrics table...")
+	ch.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS market_metrics (
+			market_id   String,
+			timestamp   DateTime,
+			trade_count UInt32,
+			volume      Float64,
+			avg_price   Float64
+		) ENGINE = MergeTree()
+		ORDER BY (market_id, timestamp)
+		TTL timestamp + INTERVAL 2 DAY;
+	`)
+
 	fmt.Println("checking price_history_1m table...")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS price_history_1m (
