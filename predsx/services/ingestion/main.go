@@ -7,9 +7,11 @@ import (
 	"hash/fnv"
 	"math"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -50,8 +52,18 @@ func main() {
 
 		// --- INDEXER CONFIG ---
 		onChainTopic := config.GetEnv("ONCHAIN_TRADES_TOPIC", "predsx.trades.onchain")
-		// Using Public RPC with Rate-Limit protection as requested
-		rpcURL := config.GetEnv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+		// Pool of free public Polygon RPC endpoints (no API key required). The indexer
+		// rotates through these and cools down any endpoint that errors out, so a single
+		// provider outage (rate limit, disabled tenant, etc.) never stalls ingestion.
+		rpcURLs := defaultRPCPool
+		if custom := config.GetEnv("POLYGON_RPC_URLS", ""); custom != "" {
+			rpcURLs = nil
+			for _, u := range strings.Split(custom, ",") {
+				if u = strings.TrimSpace(u); u != "" {
+					rpcURLs = append(rpcURLs, u)
+				}
+			}
+		}
 
 		// --- AGGREGATOR CONFIG ---
 		tradesTopic := config.GetEnv("TRADES_LIVE_TOPIC", "predsx.trades.live")
@@ -68,7 +80,7 @@ func main() {
 		go startStreamComponent(ctx, svc, kafkaBrokers, wsURL, numConns, tokenTopic, wsRawTopic)
 
 		// 2. START INDEXER COMPONENT
-		go startIndexerComponent(ctx, svc, kafkaBrokers, rpcURL, onChainTopic)
+		go startIndexerComponent(ctx, svc, kafkaBrokers, rpcURLs, onChainTopic)
 
 		// 3. START AGGREGATOR COMPONENT
 		go startAggregatorComponent(ctx, svc, kafkaBrokers, chAddr, chUser, chPassword, chDatabase, tradesTopic, metricsTopic)
@@ -330,20 +342,76 @@ func extractEventInfo(data []byte) (string, string) {
 
 const CTFContractAddress = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
-func startIndexerComponent(ctx context.Context, svc *service.BaseService, brokers, rpcURL, outputTopic string) {
+// defaultRPCPool lists free, no-API-key Polygon RPC endpoints. The rotator
+// spreads requests across them and benches any endpoint that errors out, so a
+// single provider's rate limit, outage, or "tenant disabled" never stalls the
+// indexer — it just shifts to the next one in the pool.
+var defaultRPCPool = []string{
+	"https://polygon-bor-rpc.publicnode.com",
+	"https://polygon.drpc.org",
+	"https://polygon-rpc.com",
+	"https://rpc.ankr.com/polygon",
+	"https://polygon.meowrpc.com",
+}
+
+// rpcRotator cycles through a pool of RPC endpoints and temporarily benches
+// any that error, so traffic automatically drains away from rate-limited or
+// unavailable providers without ever blocking the indexer.
+type rpcRotator struct {
+	mu      sync.Mutex
+	urls    []string
+	idx     int
+	benched map[string]time.Time
+}
+
+func newRPCRotator(urls []string) *rpcRotator {
+	return &rpcRotator{urls: urls, benched: make(map[string]time.Time)}
+}
+
+// pick returns the next endpoint that isn't currently benched, round-robin.
+func (r *rpcRotator) pick() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	for i := 0; i < len(r.urls); i++ {
+		u := r.urls[r.idx]
+		r.idx = (r.idx + 1) % len(r.urls)
+		if until, ok := r.benched[u]; !ok || now.After(until) {
+			return u
+		}
+	}
+	// Everything is benched (e.g. transient network outage) - try the next
+	// one in line anyway rather than giving up.
+	return r.urls[r.idx]
+}
+
+// bench pulls an endpoint out of rotation for a cooldown period after it
+// proves unhealthy, giving rate limits time to reset before retrying it.
+func (r *rpcRotator) bench(url string, cooldown time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.benched[url] = time.Now().Add(cooldown)
+}
+
+func startIndexerComponent(ctx context.Context, svc *service.BaseService, brokers string, rpcURLs []string, outputTopic string) {
 	producer := kafkaclient.NewTypedProducer[schemas.OnChainTradeEvent]([]string{brokers}, outputTopic, svc.Logger)
 	defer producer.Close()
 
-	// Robust Reconnection Loop
+	rotator := newRPCRotator(rpcURLs)
+
+	// Robust Reconnection Loop - rotates to the next healthy RPC on failure
+	// instead of hammering the same dead/rate-limited endpoint forever.
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
+			rpcURL := rotator.pick()
 			err := runIndexerCycle(ctx, svc, producer, rpcURL)
 			if err != nil {
-				svc.Logger.Error("indexer cycle failed, retrying", "error", err)
-				time.Sleep(10 * time.Second)
+				svc.Logger.Warn("indexer cycle failed, benching RPC and rotating", "rpc", rpcURL, "error", err)
+				rotator.bench(rpcURL, 2*time.Minute)
+				time.Sleep(5 * time.Second)
 			}
 		}
 	}
@@ -352,7 +420,7 @@ func startIndexerComponent(ctx context.Context, svc *service.BaseService, broker
 func runIndexerCycle(ctx context.Context, svc *service.BaseService, producer *kafkaclient.TypedProducer[schemas.OnChainTradeEvent], rpcURL string) error {
 	client, err := ethclient.DialContext(ctx, rpcURL)
 	if err != nil {
-		return fmt.Errorf("dial failed: %w", err)
+		return fmt.Errorf("dial %s failed: %w", rpcURL, err)
 	}
 	defer client.Close()
 
@@ -382,8 +450,11 @@ func runIndexerCycle(ctx context.Context, svc *service.BaseService, producer *ka
 	// Fallback to Polling (for HTTPS Public RPCs)
 	svc.Logger.Info("rpc does not support subscription, falling back to throttled polling")
 	lastBlock := uint64(0)
-	
-	// Throttled Loop to avoid rate limits
+	headerErrors := 0
+	logErrors := 0
+	const maxConsecutiveErrors = 3 // bench this endpoint and rotate after repeated failures
+
+	// Throttled loop, paced well within free-tier rate limits (1 req/5s + small block ranges)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -394,9 +465,14 @@ func runIndexerCycle(ctx context.Context, svc *service.BaseService, producer *ka
 		case <-ticker.C:
 			header, err := client.HeaderByNumber(ctx, nil)
 			if err != nil {
-				svc.Logger.Warn("failed to get latest block", "error", err)
+				headerErrors++
+				svc.Logger.Warn("failed to get latest block", "rpc", rpcURL, "error", err)
+				if headerErrors >= maxConsecutiveErrors {
+					return fmt.Errorf("rpc %s unhealthy after %d consecutive header errors: %w", rpcURL, headerErrors, err)
+				}
 				continue
 			}
+			headerErrors = 0
 			currentBlock := header.Number.Uint64()
 			if lastBlock == 0 {
 				lastBlock = currentBlock - 5 // Start 5 blocks back
@@ -405,11 +481,13 @@ func runIndexerCycle(ctx context.Context, svc *service.BaseService, producer *ka
 				continue
 			}
 
-			// Fetch logs in small chunks to avoid timeouts/limits
+			// Fetch logs in small chunks - capped at 40 blocks, below the
+			// strictest known eth_getLogs range limit among free public RPCs
+			// (1rpc.io/matic enforces 50), so the request succeeds everywhere.
 			from := lastBlock + 1
 			to := currentBlock
-			if to-from > 100 {
-				to = from + 100
+			if to-from > 40 {
+				to = from + 40
 			}
 
 			q := ethereum.FilterQuery{
@@ -417,14 +495,23 @@ func runIndexerCycle(ctx context.Context, svc *service.BaseService, producer *ka
 				ToBlock:   new(big.Int).SetUint64(to),
 				Addresses: []common.Address{contractAddress},
 			}
-			
-			// Rate limiting: wait 100ms between requests if we have a big range
+
+			// Space this call out from the HeaderByNumber call above so the
+			// two requests never land back-to-back - keeps every endpoint
+			// under its per-second rate limit instead of bursting in pairs.
+			time.Sleep(1 * time.Second)
+
 			vLogs, err := client.FilterLogs(ctx, q)
 			if err != nil {
-				svc.Logger.Warn("filter logs failed", "error", err)
+				logErrors++
+				svc.Logger.Warn("filter logs failed", "rpc", rpcURL, "error", err)
+				if logErrors >= maxConsecutiveErrors {
+					return fmt.Errorf("rpc %s unhealthy after %d consecutive log errors: %w", rpcURL, logErrors, err)
+				}
 				time.Sleep(1 * time.Second)
 				continue
 			}
+			logErrors = 0
 
 			for _, vLog := range vLogs {
 				processLog(ctx, producer, vLog, transferSingleSig)
@@ -465,6 +552,10 @@ type MetricBucket struct {
 	TradeCount uint32
 	Volume     float64
 	PriceSumWt float64
+	Open       float64
+	High       float64
+	Low        float64
+	Close      float64
 }
 
 func startAggregatorComponent(ctx context.Context, svc *service.BaseService, brokers, chAddr, chUser, chPassword, chDatabase, inputTopic, outputTopic string) {
@@ -546,21 +637,42 @@ func updateBucket(m map[string]*MetricBucket, trade schemas.TradeEvent, d time.D
 	key := fmt.Sprintf("%s:%d", trade.MarketID, window.Unix())
 	b, ok := m[key]
 	if !ok {
-		b = &MetricBucket{MarketID: trade.MarketID, Window: window}
+		b = &MetricBucket{MarketID: trade.MarketID, Window: window, Open: trade.Price, High: trade.Price, Low: trade.Price}
 		m[key] = b
 	}
 	b.TradeCount++
 	b.Volume += trade.Size
 	b.PriceSumWt += trade.Price * trade.Size
+	if trade.Price > b.High {
+		b.High = trade.Price
+	}
+	if trade.Price < b.Low {
+		b.Low = trade.Price
+	}
+	b.Close = trade.Price
 }
 
 func flushMetrics(ctx context.Context, svc *service.BaseService, ch clickhouse.Interface, buckets map[string]*MetricBucket, table string) {
+	// market_metrics stores 1s trade_count/volume/avg_price aggregates, while
+	// price_history_1m stores OHLC candles - each table needs its own column set.
+	isCandleTable := table == "price_history_1m" || table == "price_history_1h"
+
 	err := retry.Do(ctx, func() error {
-		b, err := ch.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s (market_id, timestamp, trade_count, volume, avg_price)", table))
+		var b driver.Batch
+		var err error
+		if isCandleTable {
+			b, err = ch.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s (market_id, timestamp, open, high, low, close, volume, trade_count)", table))
+		} else {
+			b, err = ch.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s (market_id, timestamp, trade_count, volume, avg_price)", table))
+		}
 		if err != nil {
 			return err
 		}
 		for _, bucket := range buckets {
+			if isCandleTable {
+				b.Append(bucket.MarketID, bucket.Window, bucket.Open, bucket.High, bucket.Low, bucket.Close, bucket.Volume, bucket.TradeCount)
+				continue
+			}
 			avg := 0.0
 			if bucket.Volume > 0 {
 				avg = bucket.PriceSumWt / bucket.Volume
