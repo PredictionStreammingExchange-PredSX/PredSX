@@ -7,62 +7,61 @@
 
 # PredSX — Real-Time Prediction Market Data Engine
 
-**PredSX** is a production-grade, event-driven data platform built in Go. It ingests live market data from Polymarket, normalizes complex trade events, maintains real-time orderbook states, and broadcasts live data to clients via WebSockets.
+**PredSX** is a production-grade, event-driven data platform built in Go. It ingests live market data and on-chain trade events from Polymarket, normalizes them, maintains real-time orderbook/price state, and exposes everything through a unified REST API and WebSocket gateway.
 
-The official React frontend UI for this project is hosted at: **[PredSX-Stat](https://github.com/PredictionStreammingExchange-PredSX/PredSX-Stat)**
+> The project was originally scaffolded as ~13 fine-grained microservices and has since been **consolidated into 5 high-performance "Core Hub" services** to keep resource usage lean on small VPS deployments (4GB RAM). The standalone React frontend (`PredSX-Stat`) has been retired — this repo is now backend-only.
 
 ---
 
 ## 🚀 Features
 
-- **Live Ingestion**: Connects directly to Polymarket WebSockets with robust connection pooling, automatic sharding, and consistent hashing.
-- **Microservices Architecture**: 9 specialized Go microservices decoupled by Apache Kafka event streams.
-- **In-Memory Orderbooks**: Maintains high-performance L2 orderbooks for active tokens directly in Go, persisting snapshots to Redis.
-- **Real-Time Gateway**: Built-in WebSocket hub pushes live `mid_price`, `spread`, trade feeds, and orderbook updates directly to the frontend.
-- **High-Throughput Storage**: Built with localized normalizer worker pools that batch-insert hundreds of events per second into ClickHouse.
+- **Live Ingestion**: Connects to Polymarket WebSockets and on-chain RPC (with automatic multi-endpoint failover/rotation — see [`docs/rpc-failover-design.md`](predsx/docs/rpc-failover-design.md)) with robust connection pooling and pacing.
+- **Consolidated Hub Architecture**: 5 specialized Go services (`discovery`, `ingestion`, `processor`, `storage`, `api`) decoupled by Apache Kafka event streams.
+- **In-Memory Orderbooks**: Maintains high-performance L2 orderbooks and live price state directly in Go, persisting snapshots to Redis.
+- **Unified API & Real-Time Gateway**: REST endpoints (`/v1/*`) with Redis-backed response caching and rate limiting, plus a WebSocket hub (`/stream`) pushing live trades, orderbook updates, prices, and signals — see [`docs/api-reference.md`](predsx/docs/api-reference.md).
+- **High-Throughput Storage**: Batch-inserts trades, candles, and metrics into ClickHouse, with Redis for hot state and PostgreSQL for relational/offset data.
 
 ## 🏗️ Architecture
 
-The system is highly decoupled to allow horizontal scaling of any individual component. 
+The system is decoupled via Kafka to allow horizontal scaling of any individual hub.
 
 ```text
-Polymarket API 
+Polymarket (WebSocket + On-chain RPC)
       │
       ▼
-[ stream services ] ──► Raw WS events
+[ Discovery Hub ]  ──► market & token discovery   ──► predsx.markets.*
       │
-      ├──► [ trade-engine ]     ──► predsx.trades
-      ├──► [ orderbook-engine ] ──► predsx.orderbook 
-      └──► [ price-engine ]     ──► predsx.prices
-                │
-                ▼
-        [ normalizer ] ──► ClickHouse (Batch Insertion)
-                │
-                ▼
-        [ api-gateway ] ──► REST & WebSocket Hub (port 8080)
-                │
-                ▼
-       [ PredSX-Stat UI ]
+      ▼
+[ Ingestion Hub ]  ──► live trades & on-chain logs ──► predsx.trades / predsx.onchain.*
+      │
+      ▼
+[ Processor Hub ]  ──► orderbooks, prices, signals ──► predsx.orderbook / predsx.prices / predsx.signals
+      │
+      ▼
+[ Storage Hub ]    ──► batch writes ──► ClickHouse · Redis · PostgreSQL
+      │
+      ▼
+[ API Hub ]        ──► REST (/v1/*) & WebSocket Gateway (port 8088)
 ```
 
 ## 📂 Project Structure
 
-- `predsx/libs/`: Shared production-grade libraries (Kafka clients, ClickHouse, Redis, Websocket pools, Schemas).
-- `predsx/services/`: 9 standalone microservices managing the ingestion and processing pipeline.
+- `predsx/libs/`: Shared production-grade libraries (Kafka clients, ClickHouse, Redis, Postgres, WebSocket pools, schemas, retry/config/logging).
+- `predsx/services/`: The 5 Core Hub services — `discovery`, `ingestion`, `processor`, `storage`, `api`.
 - `predsx/cmd/predsx/`: A built-in developer CLI tool for testing data streams directly from the terminal.
-- `predsx/deployments/`: Docker Compose configurations that orchestrate the 10+ container stack.
-- `frontend/`: (Optional) The React UI submodule.
+- `predsx/deployments/`: Docker Compose configurations (local + VPS) that orchestrate the full container stack.
+- `predsx/docs/`: Design docs and API reference (RPC failover design, API reference, API improvements).
 
 ---
 
 ## 🐳 Getting Started (Docker)
 
-The absolute easiest way to start the entire data pipeline (including Kafka, Redis, ClickHouse, PostgreSQL, and all 9 Go microservices) is to use the provided Windows batch scripts:
+The easiest way to start the entire data pipeline (Kafka, Redis, ClickHouse, PostgreSQL, and all 5 Core Hub services) is via the provided Windows batch scripts:
 
 ```bash
 # From the project root
 
-# 1. Start all 10+ services and background workers
+# 1. Build and start the full stack in the background
 start-docker.bat
 
 # 2. To completely stop and tear down the environment
@@ -75,8 +74,8 @@ stop-docker.bat
 
 Verify the API gateway and WebSocket hub are healthy:
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8088/health
 ```
 
-Prometheus Metrics are automatically exposed by all engines at:
+Prometheus metrics are exposed by every service at:
 `http://localhost:<service-port>/metrics`

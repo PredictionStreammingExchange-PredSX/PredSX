@@ -349,8 +349,6 @@ const CTFContractAddress = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 var defaultRPCPool = []string{
 	"https://polygon-bor-rpc.publicnode.com",
 	"https://polygon.drpc.org",
-	"https://polygon-rpc.com",
-	"https://rpc.ankr.com/polygon",
 	"https://polygon.meowrpc.com",
 }
 

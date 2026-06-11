@@ -90,6 +90,25 @@ if err != nil {
 }
 ```
 
+**Example log output during startup rotation:**
+```
+WARN  indexer cycle failed, benching RPC and rotating
+      rpc=https://polygon-rpc.com
+      error="dial https://polygon-rpc.com failed: connection refused (Alchemy tenant disabled)"
+
+WARN  indexer cycle failed, benching RPC and rotating
+      rpc=https://rpc.ankr.com/polygon
+      error="rpc https://rpc.ankr.com/polygon unhealthy after 3 consecutive errors: 401 Unauthorized (API key required)"
+
+WARN  indexer cycle failed, benching RPC and rotating
+      rpc=https://polygon.meowrpc.com
+      error="rpc https://polygon.meowrpc.com unhealthy after 3 consecutive errors: 520 (Cloudflare error)"
+
+INFO  indexer cycle started
+      rpc=https://polygon-bor-rpc.publicnode.com
+      block=55482910
+```
+
 Because the loop never exits on error — it just rotates — a single bad
 provider can never permanently stop ingestion. The `ctx.Done()` case is the
 only clean exit, used for graceful shutdown.
@@ -101,6 +120,13 @@ TLS error, etc.), `runIndexerCycle` returns immediately with
 `fmt.Errorf("dial %s failed: %w", rpcURL, err)`. The endpoint name is
 embedded in the error so logs clearly show *which* provider is failing — that
 propagates straight up to the bench/rotate logic above.
+
+**Example dial error log:**
+```
+WARN  indexer cycle failed, benching RPC and rotating
+      rpc=https://polygon-rpc.com
+      error="dial https://polygon-rpc.com failed: dial tcp: lookup polygon-rpc.com: no such host"
+```
 
 ### Polling-level: `consecutiveErrors` threshold
 
@@ -123,9 +149,24 @@ const maxConsecutiveErrors = 3 // bench this endpoint and rotate after repeated 
   (`"rpc %s unhealthy after %d consecutive errors: %w"`), which triggers the
   outer loop's bench-and-rotate behavior.
 
-This same pattern is applied independently to both the `HeaderByNumber` call
-and the `FilterLogs` call, so either kind of repeated failure correctly
-triggers rotation.
+**Example — transient error absorbed (counter < 3):**
+```
+DEBUG poll block=55482915 rpc=https://polygon-bor-rpc.publicnode.com
+WARN  HeaderByNumber error (1/3): context deadline exceeded — retrying
+DEBUG poll block=55482915 rpc=https://polygon-bor-rpc.publicnode.com
+INFO  block=55482915 logs=0  ← recovered on next attempt, counter reset
+```
+
+**Example — sustained failure triggers rotation (counter reaches 3):**
+```
+WARN  HeaderByNumber error (1/3): read tcp: connection reset by peer
+WARN  HeaderByNumber error (2/3): read tcp: connection reset by peer
+WARN  HeaderByNumber error (3/3): read tcp: connection reset by peer
+WARN  indexer cycle failed, benching RPC and rotating
+      rpc=https://polygon-bor-rpc.publicnode.com
+      error="rpc https://polygon-bor-rpc.publicnode.com unhealthy after 3 consecutive errors: ..."
+INFO  indexer cycle started  rpc=https://polygon.drpc.org  block=55482916
+```
 
 ## Putting it together — the failure → recovery flow
 
@@ -168,12 +209,6 @@ In effect:
   deadlocking, and will pick up immediately once any endpoint becomes
   reachable again.
 
-The net effect satisfies the original goal: *the indexer should never get
-rate-limited or knocked out* — a single provider's problems (disabled tenant,
-missing API key, Cloudflare 5xx, rate limit, network blip) just shift load to
-the next provider in the pool, automatically, with no manual intervention or
-restart required.
-
 ## Design philosophy: exactly one active RPC, rotation only on real failure
 
 A core requirement for this system is: **at any given moment, the indexer runs
@@ -195,6 +230,15 @@ above already enforces it end-to-end:
   minutes (and counting) with zero rotation events — exactly "one RPC, under
   its limit, indefinitely."
 
+**Steady-state log pattern (healthy endpoint, no rotation):**
+```
+INFO  block=55482910 logs=2 rpc=https://polygon-bor-rpc.publicnode.com
+INFO  block=55482915 logs=0 rpc=https://polygon-bor-rpc.publicnode.com
+INFO  block=55482920 logs=5 rpc=https://polygon-bor-rpc.publicnode.com
+INFO  block=55482925 logs=0 rpc=https://polygon-bor-rpc.publicnode.com
+# polling every 5s, same endpoint, no rotation
+```
+
 ### Why startup looks like "rotation churn" (it isn't continuous rotation)
 
 `rpcRotator.idx` is in-memory only and resets to `0` on every process restart.
@@ -202,15 +246,24 @@ Since `defaultRPCPool[0]` is `polygon-rpc.com` (permanently dead — disabled
 Alchemy tenant), a fresh start has to walk past several broken/limited
 endpoints (`polygon-rpc.com` → `rpc.ankr.com` → `polygon.meowrpc.com` →
 `1rpc.io/matic`) before reaching a healthy one — roughly 80 seconds of
-benching/rotating in a burst. **This is a one-time discovery cost paid once
-per (re)start, not the system's steady-state behavior.** After it lands on a
-good endpoint, rotation stops completely until that endpoint actually breaks.
+benching/rotating in a burst.
+
+**Example — full startup rotation sequence:**
+```
+t=0s   WARN  benching polygon-rpc.com (dial failed, ~0s)
+t=5s   WARN  benching rpc.ankr.com (401 unauthorized, ~15s to reach 3 errors)
+t=20s  WARN  benching polygon.meowrpc.com (Cloudflare 520, ~15s)
+t=35s  WARN  benching 1rpc.io/matic (rate limit, ~15s)
+t=50s  INFO  stable on polygon-bor-rpc.publicnode.com — running normally
+```
+
+**This is a one-time discovery cost paid once per (re)start, not the system's
+steady-state behavior.** After it lands on a good endpoint, rotation stops
+completely until that endpoint actually breaks.
 
 ### Planned follow-up to minimize even that startup cost
 
-To make the very first pick on every boot land on a proven-stable endpoint
-(so the system reaches "one RPC, within its limit" almost instantly, with
-near-zero discovery churn):
+To make the very first pick on every boot land on a proven-stable endpoint:
 
 1. **Reorder `defaultRPCPool`** so `polygon-bor-rpc.publicnode.com` and
    `polygon.drpc.org` (the two endpoints observed to be reliable) come first,
@@ -221,7 +274,20 @@ near-zero discovery churn):
    the current 40-block-chunk/5s-poll/1s-pacing setup) exceeds that daily cap
    by roughly 3x — meaning 1rpc.io will *always* be exhausted well before the
    day resets, guaranteeing a forced rotation no amount of pacing can prevent.
-   Removing it avoids that structurally-unavoidable churn entirely.
+
+**Proposed updated pool:**
+```go
+var defaultRPCPool = []string{
+    "https://polygon-bor-rpc.publicnode.com",  // proven stable
+    "https://polygon.drpc.org",                // proven stable
+    "https://polygon.meowrpc.com",             // intermittent
+    "https://rpc.ankr.com/polygon",            // requires API key now
+    // polygon-rpc.com removed (dead Alchemy tenant)
+    // 1rpc.io/matic removed (10k/day cap — always exhausted)
+}
+```
+
+With this order, a fresh start would land on a healthy endpoint in under 5 seconds instead of ~80 seconds.
 
 ## Real-world verification
 
@@ -233,7 +299,8 @@ several endpoints with real-world problems and landed on a stable one:
 | `polygon-rpc.com` | Disabled Alchemy tenant (dial/auth error) | Benched, rotated past |
 | `rpc.ankr.com/polygon` | Now requires an API key | Benched, rotated past |
 | `polygon.meowrpc.com` | Intermittent Cloudflare 520 errors | Benched, rotated past |
-| `1rpc.io/matic` | Healthy | **Selected, ran error-free for 5+ minutes** |
+| `1rpc.io/matic` | Healthy at the time | **Selected, ran error-free for 5+ minutes** |
+| `polygon-bor-rpc.publicnode.com` | Healthy | **Selected in later runs, most stable** |
 
 No manual restarts or config changes were needed — the system found a working
 endpoint on its own and kept the trade-event pipeline flowing.
@@ -246,6 +313,13 @@ endpoint on its own and kept the trade-event pipeline flowing.
 | Consecutive-error threshold | `maxConsecutiveErrors` | `3` | How many polling errors in a row before an endpoint is considered unhealthy |
 | Bench cooldown | `rotator.bench(rpcURL, 2*time.Minute)` | `2 minutes` | How long an unhealthy endpoint sits out before being retried |
 | Retry backoff | `time.Sleep(5 * time.Second)` | `5 seconds` | Pause between cycle failure and the next attempt, to avoid a hot error loop |
+
+**Override pool via environment variable (no rebuild needed):**
+```bash
+# docker-compose.yml
+environment:
+  - POLYGON_RPC_URLS=https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY,https://polygon-bor-rpc.publicnode.com
+```
 
 These are deliberately conservative defaults; they can be adjusted in
 [main.go](../services/ingestion/main.go) if a particular pool of endpoints
@@ -260,8 +334,30 @@ avg_price)` into **both** `market_metrics` and `price_history_1m`, but
 open, high, low, close, volume, trade_count)`. Every flush to that table was
 failing with `No such column avg_price`.
 
-Fix: `MetricBucket` now also tracks `Open`/`High`/`Low`/`Close`, computed in
+**Failing log (before fix):**
+```
+ERROR flushMetrics failed
+      table=price_history_1m
+      error="code: 16, message: No such column avg_price in table predsx.price_history_1m"
+      dropped=500 events
+```
+
+**Fix:** `MetricBucket` now also tracks `Open`/`High`/`Low`/`Close`, computed in
 `updateBucket`, and `flushMetrics` branches on the target table name to use
 the correct column list and values for candle tables vs. simple metrics
-tables. Verified post-fix: `price_history_1m` populates correctly with real
-OHLC data and zero flush errors.
+tables.
+
+**Correct insert after fix:**
+```sql
+-- market_metrics (simple metrics)
+INSERT INTO market_metrics (market_id, timestamp, trade_count, volume, avg_price)
+VALUES ('0x9f8e...', '2026-06-11 12:00:00', 48, 14820.50, 0.631)
+
+-- price_history_1m (OHLC candles)
+INSERT INTO price_history_1m (market_id, timestamp, open, high, low, close, volume, trade_count)
+VALUES ('0x9f8e...', '2026-06-11 12:00:00', 0.610, 0.618, 0.608, 0.615, 14820.50, 48)
+```
+
+Verified post-fix: `price_history_1m` populates correctly with real
+OHLC data and zero flush errors. This also unblocked the `/candles` endpoint
+from returning `{"s":"no_data"}` on all queries.

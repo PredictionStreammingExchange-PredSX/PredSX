@@ -13,6 +13,7 @@ import (
 	"github.com/predsx/predsx/libs/config"
 	"github.com/predsx/predsx/libs/crypto"
 	kafkaclient "github.com/predsx/predsx/libs/kafka-client"
+	"github.com/predsx/predsx/libs/logger"
 	postgres "github.com/predsx/predsx/libs/postgres-client"
 	redisclient "github.com/predsx/predsx/libs/redis-client"
 	retry "github.com/predsx/predsx/libs/retry-utils"
@@ -52,9 +53,9 @@ func main() {
 		if err := ch.Ping(ctx); err != nil {
 			return fmt.Errorf("clickhouse ping failed: %w", err)
 		}
-		fmt.Println("clickhouse connection verified")
+		svc.Logger.Info("clickhouse connection verified")
 
-		ensureSchemas(ctx, ch)
+		ensureSchemas(ctx, ch, svc.Logger)
 
 		pg, _ := postgres.NewClient(ctx, pgConn, 5, svc.Logger)
 		rdb := redisclient.NewClient(redisclient.Options{Addr: redisAddr}, svc.Logger)
@@ -76,7 +77,7 @@ func main() {
 // --- NORMALIZER COMPONENT ---
 
 func startNormalizerComponent(ctx context.Context, svc *service.BaseService, brokers string, ch clickhouse.Interface, rdb redisclient.Interface) {
-	ensureSchemas(ctx, ch)
+	ensureSchemas(ctx, ch, svc.Logger)
 
 	wsTopic := config.GetEnv("WS_RAW_TOPIC", "predsx.ws.raw")
 	backfillTopic := config.GetEnv("TRADES_BACKFILL_TOPIC", "predsx.trades.backfill")
@@ -149,10 +150,10 @@ func startNormalizerComponent(ctx context.Context, svc *service.BaseService, bro
 	disGroupID := config.GetEnv("MARKET_DISCOVERY_GROUP", "storage-norm-dis-v10")
 	disConsumer := kafkaclient.NewTypedConsumer[schemas.MarketDiscovered]([]string{brokers}, discoveryTopic, disGroupID, svc.Logger)
 	go func() {
-		fmt.Printf("Metadata consumer started on group: %s\n", disGroupID)
+		svc.Logger.Info("metadata consumer started", "group", disGroupID)
 		for {
 			evt, _ := disConsumer.Fetch(ctx)
-			persistMarketMetadata(ctx, ch, evt)
+			persistMarketMetadata(ctx, ch, evt, svc.Logger)
 		}
 	}()
 
@@ -164,11 +165,11 @@ func startNormalizerComponent(ctx context.Context, svc *service.BaseService, bro
 	}
 }
 
-func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
-	fmt.Println("initializing clickhouse schemas...")
+func ensureSchemas(ctx context.Context, ch clickhouse.Interface, log logger.Interface) {
+	log.Info("initializing clickhouse schemas")
 
 	// Raw events for audit/debug (3 day retention)
-	fmt.Println("checking events_raw table...")
+	log.Info("checking table", "name", "events_raw")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS events_raw (
 			event_id    String,
@@ -184,7 +185,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	`)
 
 	// Detailed trades for analytics (7 day retention)
-	fmt.Println("checking trades table...")
+	log.Info("checking table", "name", "trades")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS trades (
 			trade_id    String,
@@ -201,7 +202,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	`)
 
 	// Market metadata (Permanent)
-	fmt.Println("checking market_metadata table...")
+	log.Info("checking table", "name", "market_metadata")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS market_metadata (
 			market_id String, slug String, title String, question String, condition_id String,
@@ -211,31 +212,30 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	`)
 
 	// Orderbook history (2 day retention)
-	fmt.Println("checking orderbook_history table...")
+	log.Info("checking table", "name", "orderbook_history")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS orderbook_history (
 			market_id String, token String, timestamp DateTime64(3),
 			best_bid Float64, best_ask Float64, mid Float64, spread Float64, bids String, asks String
-		) ENGINE = MergeTree() 
+		) ENGINE = MergeTree()
 		ORDER BY (market_id, timestamp)
 		TTL timestamp + INTERVAL 2 DAY;
 	`)
 
 	// OnChain trades (14 day retention)
-	fmt.Println("checking onchain_trades table...")
+	log.Info("checking table", "name", "onchain_trades")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS onchain_trades (
 			tx_hash String, maker String, taker String, token_id String, amount String, timestamp DateTime64(3)
-		) ENGINE = MergeTree() 
+		) ENGINE = MergeTree()
 		ORDER BY (tx_hash, timestamp)
 		TTL timestamp + INTERVAL 14 DAY;
 	`)
 
 	// --- RESEARCH AGGREGATIONS (Materialized Views) ---
 
-	// 1-Minute OHLCV Candles
 	// 1-Second real-time metrics (2 day retention)
-	fmt.Println("checking market_metrics table...")
+	log.Info("checking table", "name", "market_metrics")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS market_metrics (
 			market_id   String,
@@ -248,7 +248,8 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 		TTL timestamp + INTERVAL 2 DAY;
 	`)
 
-	fmt.Println("checking price_history_1m table...")
+	// 1-Minute OHLCV Candles
+	log.Info("checking table", "name", "price_history_1m")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS price_history_1m (
 			market_id String,
@@ -263,7 +264,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 		ORDER BY (market_id, timestamp);
 	`)
 
-	fmt.Println("checking v_price_history_1m view...")
+	log.Info("checking view", "name", "v_price_history_1m")
 	ch.Exec(ctx, `
 		CREATE MATERIALIZED VIEW IF NOT EXISTS v_price_history_1m
 		TO price_history_1m
@@ -281,7 +282,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 	`)
 
 	// 1-Hour OHLCV Candles (Permanent Research Data)
-	fmt.Println("checking price_history_1h table...")
+	log.Info("checking table", "name", "price_history_1h")
 	ch.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS price_history_1h (
 			market_id String,
@@ -296,7 +297,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 		ORDER BY (market_id, timestamp);
 	`)
 
-	fmt.Println("checking v_price_history_1h view...")
+	log.Info("checking view", "name", "v_price_history_1h")
 	ch.Exec(ctx, `
 		CREATE MATERIALIZED VIEW IF NOT EXISTS v_price_history_1h
 		TO price_history_1h
@@ -312,7 +313,7 @@ func ensureSchemas(ctx context.Context, ch clickhouse.Interface) {
 		FROM trades
 		GROUP BY market_id, timestamp;
 	`)
-	fmt.Println("clickhouse schemas initialized successfully")
+	log.Info("clickhouse schemas initialized")
 }
 
 func processWebsocketEvent(ctx context.Context, ch clickhouse.Interface, rdb redisclient.Interface, p *kafkaclient.TypedProducer[schemas.TradeEvent], raw schemas.RawWebsocketEvent, onNormalized func(schemas.NormalizedEvent)) {
@@ -399,7 +400,7 @@ func processWebsocketEvent(ctx context.Context, ch clickhouse.Interface, rdb red
 		tsStr := fmt.Sprintf("%d", ts.UnixNano())
 		priceStr := fmt.Sprintf("%v", price)
 		sizeStr := fmt.Sprintf("%v", size)
-		
+
 		trade := schemas.TradeEvent{
 			TradeID:   crypto.GenerateEventID(marketID, tsStr, priceStr, sizeStr, "ws"),
 			MarketID:  marketID,
@@ -460,17 +461,17 @@ func insertOrderbookSnapshot(ctx context.Context, ch clickhouse.Interface, evt s
 		evt.MarketID, evt.Token, time.Now(), bid, ask, mid, ask-bid, string(bids), string(asks))
 }
 
-func persistMarketMetadata(ctx context.Context, ch clickhouse.Interface, evt schemas.MarketDiscovered) {
+func persistMarketMetadata(ctx context.Context, ch clickhouse.Interface, evt schemas.MarketDiscovered, log logger.Interface) {
 	title := evt.Title
 	if title == "" {
 		title = evt.Question
 	}
 	outcomes, _ := json.Marshal(evt.Outcomes)
-	fmt.Printf("Saving market to ClickHouse: %s (%s)\n", evt.ID, evt.Slug)
+	log.Info("saving market to clickhouse", "id", evt.ID, "slug", evt.Slug)
 	err := ch.Exec(ctx, `INSERT INTO market_metadata (market_id, slug, title, question, condition_id, status, exchange, event_id, start_time, end_time, outcomes, created_at, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		evt.ID, evt.Slug, title, evt.Question, evt.ConditionID, evt.Status, evt.Exchange, evt.EventID, evt.StartTime, evt.EndTime, string(outcomes), time.Now(), evt.Raw)
 	if err != nil {
-		fmt.Printf("ERROR saving market %s: %v\n", evt.ID, err)
+		log.Error("failed to save market", "id", evt.ID, "err", err)
 	}
 }
 

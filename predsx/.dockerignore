@@ -1,0 +1,28 @@
+# Docs and config files not needed in Docker build context
+docs/
+deployments/
+*.md
+*.bat
+*.txt
+Makefile
+
+# Go workspace lock — copied explicitly in Dockerfiles
+# (do NOT ignore go.work or go.work.sum — they are required)
+
+# Secrets
+**/.env
+**/.env.*
+
+# Dev artifacts
+**/*.log
+**/*.tmp
+**/tmp/
+**/vendor/
+
+# IDE and OS noise
+.git/
+.gitignore
+.vscode/
+.idea/
+**/.DS_Store
+**/Thumbs.db

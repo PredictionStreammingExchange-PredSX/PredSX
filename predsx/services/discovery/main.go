@@ -192,6 +192,10 @@ func discoverMarkets(ctx context.Context, svc *service.BaseService, url string, 
 			storeMarketMetadata(ctx, rdb, event, m)
 		}
 		offset += limit
+		// Pace pagination to avoid bursting Polymarket's Gamma API with back-to-back
+		// requests. 200ms gap keeps the full crawl under ~10 req/s regardless of
+		// market count, well below any undocumented rate limit.
+		time.Sleep(200 * time.Millisecond)
 	}
 	return nil
 }

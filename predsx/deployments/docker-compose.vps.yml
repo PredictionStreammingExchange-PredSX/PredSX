@@ -5,6 +5,11 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_AUTOPURGE_SNAP_RETAIN_COUNT: 3
+      ZOOKEEPER_AUTOPURGE_PURGE_INTERVAL: 24
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
     deploy:
       resources:
         limits:
@@ -27,8 +32,13 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 6
       KAFKA_HEAP_OPTS: "-Xms256M -Xmx256M"
       KAFKA_LOG_RETENTION_HOURS: 2
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+    volumes:
+      - kafka_data:/var/lib/kafka/data
     deploy:
       resources:
         limits:
@@ -38,15 +48,26 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   redis:
     image: redis:latest
     restart: always
-    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
     deploy:
       resources:
         limits:
           memory: 100M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -97,7 +118,7 @@ services:
     restart: always
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
       postgres:
         condition: service_healthy
       clickhouse:
@@ -110,6 +131,7 @@ services:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
+      - METRICS_PORT=8081
     deploy:
       resources:
         limits:
@@ -126,7 +148,7 @@ services:
     restart: always
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
       clickhouse:
         condition: service_healthy
     environment:
@@ -135,6 +157,8 @@ services:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
+      - POLYGON_RPC_URLS=${POLYGON_RPC_URLS}
+      - METRICS_PORT=8082
     deploy:
       resources:
         limits:
@@ -151,7 +175,7 @@ services:
     restart: always
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
       clickhouse:
@@ -163,6 +187,8 @@ services:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
+      - METRICS_PORT=8083
+      - BACKTEST_PORT=8085
     deploy:
       resources:
         limits:
@@ -179,7 +205,7 @@ services:
     restart: always
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
       clickhouse:
         condition: service_healthy
       redis:
@@ -194,6 +220,7 @@ services:
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
       - POSTGRES_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-predsx}?sslmode=disable
       - REDIS_ADDR=redis:6379
+      - METRICS_PORT=8084
     deploy:
       resources:
         limits:
@@ -212,7 +239,7 @@ services:
       - "8088:8088"
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
       clickhouse:
@@ -238,3 +265,6 @@ services:
 volumes:
   postgres_data:
   clickhouse_data:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_log:

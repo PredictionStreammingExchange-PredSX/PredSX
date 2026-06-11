@@ -7,6 +7,9 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
       ZOOKEEPER_AUTOPURGE_SNAP_RETAIN_COUNT: 3
       ZOOKEEPER_AUTOPURGE_PURGE_INTERVAL: 24
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
     deploy:
       resources:
         limits:
@@ -26,16 +29,17 @@ services:
     image: confluentinc/cp-kafka:7.5.0
     restart: unless-stopped
     ports:
-      - "9092:9092"
-      - "9094:9094"
+      - "127.0.0.1:9092:9092"
     depends_on:
       zookeeper:
         condition: service_started
+    volumes:
+      - kafka_data:/var/lib/kafka/data
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
@@ -66,7 +70,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "48mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     deploy:
       resources:
         limits:
@@ -86,7 +90,7 @@ services:
     image: postgres:16
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
@@ -112,8 +116,8 @@ services:
     image: clickhouse/clickhouse-server:latest
     restart: unless-stopped
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
     environment:
@@ -149,6 +153,7 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - POSTGRES_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-predsx}?sslmode=disable
       - REDIS_ADDR=redis:6379
+      - METRICS_PORT=8081
     deploy:
       resources:
         limits:
@@ -173,9 +178,10 @@ services:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
-      - POLYGON_RPC_URL=${POLYGON_RPC_URL}
+      - POLYGON_RPC_URLS=${POLYGON_RPC_URLS}
       - POLYMARKET_WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market
       - WS_CONNECTIONS=4
+      - METRICS_PORT=8082
     deploy:
       resources:
         limits:
@@ -201,7 +207,8 @@ services:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
-      - BACKTEST_PORT=8082
+      - METRICS_PORT=8083
+      - BACKTEST_PORT=8085
     deploy:
       resources:
         limits:
@@ -228,6 +235,7 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
       - POSTGRES_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-predsx}?sslmode=disable
+      - METRICS_PORT=8084
     deploy:
       resources:
         limits:
@@ -270,3 +278,6 @@ services:
 volumes:
   postgres_data:
   clickhouse_data:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_log:

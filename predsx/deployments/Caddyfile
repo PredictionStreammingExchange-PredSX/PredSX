@@ -1,0 +1,20 @@
+{$DOMAIN} {
+    # Compress responses
+    encode gzip
+
+    # Pass real client IP to the Go API
+    header_up X-Real-IP {remote_host}
+    header_up X-Forwarded-For {remote_host}
+
+    # Proxy everything to the API hub (internal Docker network — no port exposure needed)
+    reverse_proxy hub-api:8088 {
+        # WebSocket support — Caddy handles Upgrade automatically,
+        # but explicit flush interval keeps /stream latency low
+        flush_interval -1
+    }
+}
+
+# Redirect bare HTTP to HTTPS (Caddy does this automatically, this is explicit for clarity)
+http://{$DOMAIN} {
+    redir https://{$DOMAIN}{uri} permanent
+}
