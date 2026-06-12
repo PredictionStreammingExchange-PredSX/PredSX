@@ -330,7 +330,7 @@ func (h *APIHandler) GetPrice(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
 
-	data, err := h.Redis.Get(ctx, "predsx:price:"+id).Result()
+	data, err := h.Redis.Get(ctx, "live:price:"+id).Result()
 	if err != nil {
 		http.Error(w, "price not found", http.StatusNotFound)
 		return
@@ -397,7 +397,8 @@ func (h *APIHandler) GetMarketTrades(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.ClickHouse.Query(ctx, query, args...)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("clickhouse query error: %v", err), http.StatusInternalServerError)
+		h.Logger.Error("trades query failed", "market_id", id, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer func() {
@@ -474,7 +475,8 @@ func (h *APIHandler) GetMarketPriceHistory(w http.ResponseWriter, r *http.Reques
 
 	rows, err := h.ClickHouse.Query(ctx, query, args...)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("clickhouse query error: %v", err), http.StatusInternalServerError)
+		h.Logger.Error("price history query failed", "market_id", id, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer func() {
@@ -677,7 +679,8 @@ func (h *APIHandler) GetDebugTrades(w http.ResponseWriter, r *http.Request) {
 	query := "SELECT trade_id, market_id, price, size, side, timestamp FROM trades ORDER BY timestamp DESC LIMIT 50"
 	rows, err := h.ClickHouse.Query(ctx, query)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("clickhouse query error: %v", err), http.StatusInternalServerError)
+		h.Logger.Error("debug trades query failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer func() {
@@ -720,7 +723,8 @@ func (h *APIHandler) GetDebugOrderbook(w http.ResponseWriter, r *http.Request) {
 	query := "SELECT data FROM events WHERE type='predsx.orderbook' AND market_id=? ORDER BY timestamp DESC LIMIT 1"
 	rows, err := h.ClickHouse.Query(ctx, query, id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("clickhouse query error: %v", err), http.StatusInternalServerError)
+		h.Logger.Error("debug orderbook query failed", "market_id", id, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -1330,7 +1334,8 @@ func (h *APIHandler) SearchMarkets(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.ClickHouse.Query(ctx, query, args...)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("query error: %v", err), http.StatusInternalServerError)
+		h.Logger.Error("search query failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer func() {
@@ -1420,7 +1425,8 @@ func (h *APIHandler) GetTopMarkets(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.ClickHouse.Query(ctx, query, cutoff, limit)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("query error: %v", err), http.StatusInternalServerError)
+		h.Logger.Error("top markets query failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer func() {
@@ -1654,7 +1660,8 @@ func (h *APIHandler) GetRelatedMarkets(w http.ResponseWriter, r *http.Request) {
 	`
 	rows, err := h.ClickHouse.Query(ctx, query, eventID, id, limit)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("query error: %v", err), http.StatusInternalServerError)
+		h.Logger.Error("related markets query failed", "market_id", id, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	defer func() {

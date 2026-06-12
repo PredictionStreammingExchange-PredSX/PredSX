@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/predsx/predsx/libs/config"
@@ -28,12 +29,40 @@ type PolymarketMarket struct {
 	EndDate      string          `json:"endDate"`
 	Outcomes     string          `json:"outcomes"`
 	Status       string          `json:"status"`
+	Active       bool            `json:"active"`
+	Closed       bool            `json:"closed"`
+	Resolved     bool            `json:"resolved"`
 	ClobTokenIds json.RawMessage `json:"clobTokenIds"`
+}
+
+func (m PolymarketMarket) DerivedStatus() string {
+	if m.Status != "" {
+		return strings.ToUpper(m.Status)
+	}
+	if m.Resolved {
+		return "RESOLVED"
+	}
+	if m.Closed {
+		return "CLOSED"
+	}
+	if m.Active {
+		return "ACTIVE"
+	}
+	return "UNKNOWN"
 }
 
 type GammaResponse struct {
 	Value []PolymarketMarket `json:"value"`
 	Count int                `json:"Count"`
+}
+
+type PolymarketEvent struct {
+	ID      string             `json:"id"`
+	Slug    string             `json:"slug"`
+	Title   string             `json:"title"`
+	Active  bool               `json:"active"`
+	Closed  bool               `json:"closed"`
+	Markets []PolymarketMarket `json:"markets"`
 }
 
 func main() {
@@ -46,6 +75,7 @@ func main() {
 		tokenTopic := config.GetEnv("TOKEN_EXTRACTOR_TOPIC", "predsx.tokens.extracted")
 		pollInterval := time.Duration(config.GetEnvInt("POLL_INTERVAL_SECONDS", 60)) * time.Second
 		gammaURL := config.GetEnv("GAMMA_API_URL", "https://gamma-api.polymarket.com/markets")
+		eventsURL := config.GetEnv("GAMMA_EVENTS_URL", "https://gamma-api.polymarket.com/events")
 		redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
 
 		// Kafka Clients
@@ -74,19 +104,33 @@ func main() {
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 
-		// Initial Discovery
-		if err := discoverMarkets(ctx, svc, gammaURL, rdb, discoveryProducer, tokenProducer); err != nil {
-			svc.Logger.Error("initial discovery failed", "error", err)
+		runBoth := func(label string) {
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				if err := discoverMarkets(ctx, svc, gammaURL, rdb, discoveryProducer, tokenProducer); err != nil {
+					svc.Logger.Error(label+" markets failed", "error", err)
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				if err := discoverEvents(ctx, svc, eventsURL, rdb, discoveryProducer, tokenProducer); err != nil {
+					svc.Logger.Error(label+" events failed", "error", err)
+				}
+			}()
+			wg.Wait()
 		}
+
+		// Initial Discovery
+		runBoth("initial discovery")
 
 		for {
 			select {
 			case <-ctx.Done():
 				return nil
 			case <-ticker.C:
-				if err := discoverMarkets(ctx, svc, gammaURL, rdb, discoveryProducer, tokenProducer); err != nil {
-					svc.Logger.Error("discovery cycle failed", "error", err)
-				}
+				runBoth("discovery cycle")
 			}
 		}
 	})
@@ -164,7 +208,7 @@ func discoverMarkets(ctx context.Context, svc *service.BaseService, url string, 
 				Raw:          string(rawBytes),
 				StartTime:    startTime,
 				EndTime:      endTime,
-				Status:       m.Status,
+				Status:       m.DerivedStatus(),
 				CreatedAt:    time.Now(),
 				Version:      schemas.VersionV1,
 			}
@@ -253,6 +297,97 @@ func storeMarketMetadata(ctx context.Context, rdb redisclient.Interface, event s
 		rdb.Set(ctx, fmt.Sprintf("condition:%s:market_id", event.ConditionID), event.ID, 0)
 	}
 	rdb.SAdd(ctx, "predsx:markets", event.ID)
+}
+
+func discoverEvents(ctx context.Context, svc *service.BaseService, url string, rdb redisclient.Interface, producer *kafkaclient.TypedProducer[schemas.MarketDiscovered], tokenProducer *kafkaclient.TypedProducer[schemas.TokenExtracted]) error {
+	limit := 100
+	offset := 0
+	sep := "?"
+	if strings.Contains(url, "?") {
+		sep = "&"
+	}
+
+	for {
+		pagedURL := fmt.Sprintf("%s%slimit=%d&offset=%d&active=true&closed=false", url, sep, limit, offset)
+		var events []PolymarketEvent
+
+		err := retry.Do(ctx, func() error {
+			resp, err := http.Get(pagedURL)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return err
+			}
+			return json.Unmarshal(body, &events)
+		}, retry.DefaultOptions())
+
+		if err != nil {
+			return fmt.Errorf("failed to fetch events: %w", err)
+		}
+		if len(events) == 0 {
+			break
+		}
+
+		svc.Logger.Info("fetched events from gamma", "count", len(events), "offset", offset)
+
+		for _, ev := range events {
+			for _, m := range ev.Markets {
+				// Guarantee event_id is set — use the parent event ID if missing on the market
+				if m.EventID == "" {
+					m.EventID = ev.ID
+				}
+
+				clobTokenIDs := parseClobTokenIDs(m.ClobTokenIds)
+				startTime := parseTime(m.StartDate)
+				endTime := parseTime(m.EndDate)
+				rawBytes, _ := json.Marshal(m)
+
+				event := schemas.MarketDiscovered{
+					ID:           m.ID,
+					Slug:         m.Slug,
+					Title:        m.Title,
+					Question:     m.Question,
+					ConditionID:  m.ConditionID,
+					ClobTokenIDs: clobTokenIDs,
+					Exchange:     "polymarket",
+					EventID:      m.EventID,
+					Raw:          string(rawBytes),
+					StartTime:    startTime,
+					EndTime:      endTime,
+					Status:       m.DerivedStatus(),
+					CreatedAt:    time.Now(),
+					Version:      schemas.VersionV1,
+				}
+
+				var outcomes []string
+				if err := json.Unmarshal([]byte(m.Outcomes), &outcomes); err == nil {
+					event.Outcomes = outcomes
+				}
+
+				if err := producer.Publish(ctx, event.ID, event); err != nil {
+					svc.Logger.Error("failed to publish event market", "id", event.ID, "error", err)
+				} else {
+					svc.Logger.Info("published event market to kafka", "id", event.ID, "event_id", ev.ID)
+				}
+
+				if err := processMarket(ctx, svc, event, rdb, tokenProducer); err != nil {
+					svc.Logger.Error("failed to extract tokens for event market", "id", event.ID, "error", err)
+				}
+
+				storeMarketMetadata(ctx, rdb, event, m)
+			}
+		}
+
+		offset += limit
+		time.Sleep(200 * time.Millisecond)
+	}
+	return nil
 }
 
 func parseTime(raw string) time.Time {

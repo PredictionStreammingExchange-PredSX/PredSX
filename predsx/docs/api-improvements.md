@@ -431,6 +431,177 @@ if count > 60 {
 
 ---
 
+## 8. Security Headers Middleware
+
+**Problem:** API responses had no defensive HTTP headers, leaving clients exposed to MIME sniffing, clickjacking, and XSS.
+
+**What changed:** New `SecurityHeaders` middleware in `middleware/securityheaders.go` injects 5 headers on every response:
+
+```go
+w.Header().Set("X-Content-Type-Options", "nosniff")
+w.Header().Set("X-Frame-Options", "DENY")
+w.Header().Set("X-XSS-Protection", "1; mode=block")
+w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+w.Header().Set("Content-Security-Policy", "default-src 'none'")
+```
+
+Applied globally in `main.go` alongside CORS:
+```go
+r.Use(middleware.CORS)
+r.Use(middleware.SecurityHeaders)
+```
+
+**Files:** `middleware/securityheaders.go`, `main.go`
+
+---
+
+## 9. CORS Allowlisting via Environment Variable
+
+**Problem:** CORS middleware used `Access-Control-Allow-Origin: *`, allowing any origin to make cross-origin requests.
+
+**What changed:** `middleware/cors.go` was rewritten to read allowed origins from the `ALLOWED_ORIGINS` env var (comma-separated list). Defaults to `http://localhost:3000` for local dev.
+
+```yaml
+# .env
+ALLOWED_ORIGINS=https://app.predsx.com,https://predsx.com
+```
+
+- When the request `Origin` matches the allowlist, that exact origin is echoed back with `Vary: Origin`
+- When `ALLOWED_ORIGINS=*`, wildcard is preserved (opt-in only)
+- Non-matching origins receive no `Access-Control-Allow-Origin` header
+- Allowed methods restricted to `GET,OPTIONS`
+
+**Files:** `middleware/cors.go`
+
+---
+
+## 10. Rate Limiter — Trusted Proxy Support
+
+**Problem:** The rate limiter read `X-Forwarded-For` unconditionally. Any client could spoof a different IP and bypass per-IP limits.
+
+**What changed:** `X-Forwarded-For` is now only trusted when the direct connection IP is in the `TRUSTED_PROXIES` env var (comma-separated CIDRs or IPs). If not configured, `RemoteAddr` is always used directly.
+
+```yaml
+# .env — set to your load balancer / reverse proxy IP
+TRUSTED_PROXIES=10.0.0.1/24
+```
+
+```go
+// extractClientIP only reads XFF when remote IP is in trusted list
+func extractClientIP(r *http.Request, trustedProxies []*net.IPNet) string {
+    remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+    if len(trustedProxies) > 0 && isTrusted(remoteIP, trustedProxies) {
+        // trust XFF headers
+    }
+    return remoteIP  // fall through to direct connection
+}
+```
+
+Also added `Retry-After: 60` response header on HTTP 429 responses.
+
+**Files:** `middleware/ratelimit.go`
+
+---
+
+## 11. Internal Error Masking
+
+**Problem:** 7 error paths in `handlers/rest.go` returned raw ClickHouse error messages to the client (e.g. `"clickhouse query error: context deadline exceeded"`), leaking internal stack details.
+
+**What changed:** All 7 locations now log the full error internally and return the generic string `"internal server error"` to the client:
+
+```go
+// Before
+http.Error(w, fmt.Sprintf("clickhouse query error: %v", err), http.StatusInternalServerError)
+
+// After
+h.Logger.Error("trades query failed", "market_id", id, "error", err)
+http.Error(w, "internal server error", http.StatusInternalServerError)
+```
+
+Affected handlers: `GetMarketTrades`, `GetMarketPriceHistory`, `GetEvents`, `GetTopMarkets`, `GetMarketSummary`, `GetMarketStats`, `GetRelatedMarkets`.
+
+**Files:** `handlers/rest.go`
+
+---
+
+## 12. HTTP Server Hardening
+
+**Problem:** `http.Server` had no `IdleTimeout` or `MaxHeaderBytes` limit, leaving it open to slow-connection and oversized-header attacks.
+
+**What changed:**
+
+```go
+srv := &http.Server{
+    Handler:        r,
+    Addr:           ":" + port,
+    WriteTimeout:   15 * time.Second,
+    ReadTimeout:    15 * time.Second,
+    IdleTimeout:    60 * time.Second,  // added
+    MaxHeaderBytes: 1 << 16,           // added — 64 KB cap
+}
+```
+
+- `IdleTimeout: 60s` — idle keep-alive connections are closed after 60 seconds
+- `MaxHeaderBytes: 65536` — requests with headers over 64 KB are rejected with `431 Request Header Fields Too Large`
+
+**Files:** `main.go`
+
+---
+
+## 13. `/metrics` Gated Behind Debug Auth
+
+**Problem:** Prometheus `/metrics` endpoint was public — anyone could scrape internal counters, goroutine counts, and memory stats.
+
+**What changed:** `/metrics` is now wrapped in `middleware.DebugAuth`, requiring the same `DEBUG_TOKEN` as all other debug routes:
+
+```go
+// Before
+r.Handle("/metrics", promhttp.Handler())
+
+// After
+r.Handle("/metrics", middleware.DebugAuth(promhttp.Handler()))
+```
+
+Without `DEBUG_TOKEN` set → returns `403 debug endpoints disabled`.
+With wrong token → returns `403 forbidden`.
+
+**Files:** `main.go`
+
+---
+
+## 14. Parallel Event Discovery
+
+**Problem:** Discovery only polled `https://gamma-api.polymarket.com/markets`, which often returns markets without `event_id`. Markets in event groups (e.g. "World Cup — which team wins?") had empty `event_id`, so `/related` always returned `[]`.
+
+Additionally, `discoverMarkets` and `discoverEvents` ran sequentially — event discovery couldn't start until the full markets crawl finished (potentially 30–60 minutes).
+
+**What changed:**
+
+1. Added `discoverEvents` function in `services/discovery/main.go` that paginates the Gamma `/events` endpoint. Each event contains nested markets with `event_id` guaranteed:
+   ```go
+   // Force event_id from parent if missing on the nested market
+   if m.EventID == "" {
+       m.EventID = ev.ID
+   }
+   ```
+
+2. Both discovery loops now run **concurrently** using `sync.WaitGroup`:
+   ```go
+   var wg sync.WaitGroup
+   wg.Add(2)
+   go func() { defer wg.Done(); discoverMarkets(...) }()
+   go func() { defer wg.Done(); discoverEvents(...) }()
+   wg.Wait()
+   ```
+
+3. New env var: `GAMMA_EVENTS_URL` (default: `https://gamma-api.polymarket.com/events`)
+
+After a full cycle, markets with `event_id` populated will return their event siblings via `/v1/markets/{id}/related`. Standalone markets (no event group) will always return `[]`.
+
+**Files:** `services/discovery/main.go`
+
+---
+
 ## Summary Table
 
 | # | Improvement | File(s) Changed |
@@ -442,3 +613,10 @@ if count > 60 {
 | 5 | WebSocket per-market subscription filtering | `ws/hub.go`, `ws/client.go`, `ws/broadcaster.go` |
 | 6 | Debug endpoint auth via `DEBUG_TOKEN` | `middleware/auth.go`, `main.go` |
 | 7 | `GET /v1/markets/{id}/candles` TradingView OHLCV | `handlers/rest.go`, `main.go` |
+| 8 | Security headers on all responses | `middleware/securityheaders.go`, `main.go` |
+| 9 | CORS allowlisting via `ALLOWED_ORIGINS` env var | `middleware/cors.go` |
+| 10 | Rate limiter trusted proxy support (`TRUSTED_PROXIES`) | `middleware/ratelimit.go` |
+| 11 | Internal error masking (7 handlers) | `handlers/rest.go` |
+| 12 | HTTP server hardening (IdleTimeout, MaxHeaderBytes) | `main.go` |
+| 13 | `/metrics` gated behind `DEBUG_TOKEN` | `main.go` |
+| 14 | Parallel event discovery — populates `event_id` | `services/discovery/main.go` |

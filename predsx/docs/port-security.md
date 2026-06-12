@@ -414,6 +414,7 @@ during that deploy — no rebuild needed.
 
 ## Related Docs
 
+- [vps-deploy.md](vps-deploy.md) — Full VPS deployment guide and API endpoint verification
 - [api-reference.md](api-reference.md) — API endpoint reference and rate limits
 - [rpc-failover-design.md](rpc-failover-design.md) — Polygon RPC pool rotation design
 - [info.md](info.md) — Storage and logging policy

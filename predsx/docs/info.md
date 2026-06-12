@@ -81,7 +81,7 @@ Each service is stateless. See [`api-reference.md`](api-reference.md) for full R
 
 ## 4. Quick Start — Docker Commands
 
-Run all commands from the root `PredSX` folder (`C:\Users\vijay\OneDrive\Desktop\PredSX`).
+Run all commands from the root `PredSX` folder (`C:\path\to\PredSX`).
 
 ### Start the Stack
 ```bash
@@ -295,7 +295,7 @@ Three classes of errors resolved:
 
 ### Stage 7 — Version Control Setup
 
-- Git initialized at `C:/Users/vijay/OneDrive/Desktop/PredSX/`
+- Git initialized at `C:/path/to/PredSX/`
 - `.gitignore` covers binaries, `.env`, `vendor/`, IDE folders, Docker `.tar` artifacts, logs
 - Initial commit: **72 files, 4023 insertions**
 
@@ -392,6 +392,46 @@ See [`port-security.md`](port-security.md) for the full networking, port binding
 
 ---
 
+### Stage 13 — VPS First Deploy: Production Bug Fixes
+
+After the first real VPS deploy, two bugs surfaced that only appeared with live Polymarket data.
+
+---
+
+**Bug 1 — `/v1/markets?status=ACTIVE` returned `{"data":[]}`**
+
+Root cause: `PolymarketMarket` struct in `services/discovery/main.go` had `Status string \`json:"status"\`` but the Polymarket Gamma API returns boolean fields (`active`, `closed`, `resolved`), not a string `status`. The field always deserialized as `""`. Storage wrote all markets to ClickHouse with empty `status`. The API query uses `WHERE LOWER(status) = LOWER(?)`, so filtering for `ACTIVE` returned zero rows.
+
+Fix:
+- Added `Active bool \`json:"active"\``, `Closed bool \`json:"closed"\``, `Resolved bool \`json:"resolved"\`` to `PolymarketMarket`
+- Added `DerivedStatus()` method that maps booleans → `"ACTIVE"` / `"CLOSED"` / `"RESOLVED"` / `"UNKNOWN"`, with fallback to the string field if present
+- Changed event construction to use `Status: m.DerivedStatus()`
+
+After deploying the fixed discovery image (`docker compose up -d --no-deps hub-discovery`), new rows appeared in ClickHouse with correct status within one poll cycle (~60s).
+
+---
+
+**Bug 2 — `/v1/markets/{id}/price` returned `"price not found"` for all markets**
+
+Root cause: key mismatch between writer and reader.
+- Processor hub writes to Redis key: `live:price:<marketID>`
+- API `GetPrice` handler read from: `predsx:price:<marketID>`
+
+Fix: Changed `rest.go` line 333 from `predsx:price:` to `live:price:`.
+
+---
+
+**Operational lessons learned:**
+
+| Lesson | Detail |
+|--------|--------|
+| `docker save >` corrupts tar files | PowerShell `>` writes UTF-16 with BOM. Always use `docker save -o file.tar` |
+| `docker compose restart` does not load new images | It restarts the existing container. Use `docker compose up -d --no-deps <service>` to recreate with a newly loaded image |
+| ClickHouse database is `default`, not `predsx` | All tables live in `default`. Queries must use `default.market_metadata` etc. |
+| Container prefix is `package-*`, not `predsx-*` | Docker uses the compose file's directory name (`package`) as the project prefix |
+
+---
+
 ## Final Checklist
 
 | Component | Status |
@@ -407,7 +447,20 @@ See [`port-security.md`](port-security.md) for the full networking, port binding
 | Stability hardening (Phase 2) | ✅ Done |
 | Pre-VPS deploy prep (Phase 3) | ✅ Done — `.dockerignore`, Caddy TLS overlay, hub `METRICS_PORT` wired |
 | Nice-to-have cleanup (Phase 4) | ✅ Done — structured logger in storage hub, git-tagged image builds |
+| VPS first deploy | ✅ Live on Hetzner `YOUR_VPS_IP:8088` |
+| Discovery status bug fix | ✅ `DerivedStatus()` — Gamma API booleans → proper status string |
+| Price endpoint Redis key fix | ✅ `live:price:` key — processor and API now aligned |
 
 ---
 
-*Last updated: June 2026*
+## Related Docs
+
+- [vps-deploy.md](vps-deploy.md) — Full VPS deployment guide and API endpoint verification
+- [port-security.md](port-security.md) — Port bindings, networking, UFW, TLS
+- [api-reference.md](api-reference.md) — API endpoint reference and response schemas
+- [storage-projections.md](storage-projections.md) — Disk and RAM capacity planning
+- [rpc-failover-design.md](rpc-failover-design.md) — Polygon RPC pool rotation design
+
+---
+
+*Last updated: June 12, 2026*

@@ -25,11 +25,11 @@ docker build -t predsx-api:latest -t predsx-api:!GIT_HASH! -f services/api/Docke
 echo [2/4] Exporting Images to .tar files...
 if not exist "deployments\package" mkdir "deployments\package"
 
-docker save predsx-discovery:latest > deployments\package\discovery.tar
-docker save predsx-ingestion:latest > deployments\package\ingestion.tar
-docker save predsx-processor:latest > deployments\package\processor.tar
-docker save predsx-storage:latest > deployments\package\storage.tar
-docker save predsx-api:latest > deployments\package\api.tar
+docker save predsx-discovery:latest -o deployments\package\discovery.tar
+docker save predsx-ingestion:latest -o deployments\package\ingestion.tar
+docker save predsx-processor:latest -o deployments\package\processor.tar
+docker save predsx-storage:latest -o deployments\package\storage.tar
+docker save predsx-api:latest -o deployments\package\api.tar
 
 echo [3/4] Preparing Deployment Package...
 copy deployments\docker-compose.vps.yml deployments\package\docker-compose.yml

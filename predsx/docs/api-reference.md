@@ -28,11 +28,13 @@ curl http://localhost:8088/health
 ```
 
 ### `GET /metrics`
-Prometheus metrics scrape endpoint. Returns plain-text Prometheus exposition format.
+Prometheus metrics scrape endpoint. Requires `DEBUG_TOKEN` — same auth as `/debug/*` routes.
 
 ```bash
-curl http://localhost:8088/metrics
+curl -H "X-Debug-Token: your-secret-token" http://localhost:8088/metrics
 ```
+
+Returns `403 debug endpoints disabled` if `DEBUG_TOKEN` is not set in the environment.
 
 ### `POST /graphql`
 Placeholder stub — always returns `{"data": {"message": "GraphQL API placeholder"}}`.
@@ -395,8 +397,9 @@ curl "http://localhost:8088/v1/markets/0x9f8e7d6c5b4a3928170605040302010f9e8d7c6
 ---
 
 ### `GET /v1/markets/{id}/price`
-Current live price, served verbatim from Redis (`predsx:price:{id}`).
+Current live price, served verbatim from Redis (`live:price:{id}`).
 Returns `404 price not found` if no snapshot is cached for this market.
+Price is written by the processor hub when it receives live trade or orderbook events from Polymarket's WebSocket — it populates within seconds of ingestion subscribing to the market's tokens.
 
 ```bash
 curl "http://localhost:8088/v1/markets/0x9f8e7d6c5b4a3928170605040302010f9e8d7c6b/price"
@@ -547,7 +550,9 @@ curl "http://localhost:8088/v1/markets/0x9f8e7d6c5b4a3928170605040302010f9e8d7c6
 ]
 ```
 
-Returns `[]` if the market has no `event_id`.
+Returns `[]` if the market has no `event_id`. Standalone Polymarket markets (single yes/no questions) always return `[]`. Multi-outcome event groups (e.g. "Which team wins the World Cup?") return their siblings.
+
+`event_id` is populated by the discovery service polling the Gamma `/events` endpoint every 60 seconds. After first boot, allow one full discovery cycle (~60s) before expecting results here.
 
 ---
 
@@ -828,13 +833,44 @@ X-RateLimit-Remaining: 47
 ```
 
 When exceeded:
-```json
+```
 HTTP 429
-{ "error": "rate limit exceeded", "retry_after": "60s" }
+Retry-After: 60
+{"error":"rate limit exceeded","retry_after":"60s"}
 ```
 
+**Behind a reverse proxy?** Set `TRUSTED_PROXIES` to the proxy's IP/CIDR so the real client IP is read from `X-Forwarded-For`:
+
+```yaml
+# .env
+TRUSTED_PROXIES=10.0.0.1/24
+```
+
+When unset, `X-Forwarded-For` is ignored and `RemoteAddr` is always used directly.
+
+### CORS
+Allowed origins are controlled by `ALLOWED_ORIGINS` (comma-separated). Defaults to `http://localhost:3000`.
+
+```yaml
+# .env
+ALLOWED_ORIGINS=https://app.predsx.com,https://predsx.com
+```
+
+Set `ALLOWED_ORIGINS=*` only if you intentionally want a public API.
+
+### Security Headers
+Every response includes these headers:
+
+| Header | Value |
+|--------|-------|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `X-XSS-Protection` | `1; mode=block` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Content-Security-Policy` | `default-src 'none'` |
+
 ### Debug Token
-Set the `DEBUG_TOKEN` environment variable to enable debug endpoints.
+Set the `DEBUG_TOKEN` environment variable to enable `/debug/*` routes and `/metrics`.
 
 ```yaml
 # docker-compose.yml environment section for hub-api
@@ -847,9 +883,10 @@ Pass the token via:
 
 ```bash
 curl -H "X-Debug-Token: your-secret-token" http://localhost:8088/debug/signals
+curl -H "X-Debug-Token: your-secret-token" http://localhost:8088/metrics
 ```
 
-If `DEBUG_TOKEN` is not set, all `/debug/*` routes return `403 debug endpoints disabled`.
+If `DEBUG_TOKEN` is not set, all `/debug/*` routes and `/metrics` return `403 debug endpoints disabled`.
 
 ---
 
@@ -885,7 +922,7 @@ curl -I "http://localhost:8088/v1/markets/top"
 | `400 Bad Request` | `"wallet is required"` | `/v1/positions` called without `wallet` param |
 | `404 Not Found` | `"market not found"` | Market ID not in Redis `predsx:markets` set |
 | `404 Not Found` | `"orderbook not found"` | No orderbook snapshot cached in Redis |
-| `404 Not Found` | `"price not found"` | No price snapshot cached in Redis |
+| `404 Not Found` | `"price not found"` | No `live:price:{id}` key in Redis — ingestion hasn't received a trade/orderbook event for this market yet |
 | `429 Too Many Requests` | `{"error":"rate limit exceeded","retry_after":"60s"}` | Over 60 req/min from same IP |
 | `403 Forbidden` | `"debug endpoints disabled"` | `DEBUG_TOKEN` not set in env |
 | `403 Forbidden` | `"forbidden"` | Wrong debug token supplied |

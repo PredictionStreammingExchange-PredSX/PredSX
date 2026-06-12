@@ -57,10 +57,13 @@ func main() {
 		// Router
 		r := mux.NewRouter()
 		r.Use(middleware.CORS)
+		r.Use(middleware.SecurityHeaders)
 
 		// Public Routes
-		r.Handle("/metrics", promhttp.Handler())
 		r.HandleFunc("/health", h.GetHealth).Methods("GET")
+
+		// Metrics — gated behind DEBUG_TOKEN same as /debug/* routes
+		r.Handle("/metrics", middleware.DebugAuth(promhttp.Handler()))
 
 		// WebSocket Gateway
 		hub := ws.NewHub(svc.Logger)
@@ -123,6 +126,8 @@ func main() {
 			Addr:         ":" + port,
 			WriteTimeout: 15 * time.Second,
 			ReadTimeout:  15 * time.Second,
+			IdleTimeout:  60 * time.Second,
+			MaxHeaderBytes: 1 << 16, // 64 KB
 		}
 
 		svc.Logger.Info("API server starting", "port", port)
