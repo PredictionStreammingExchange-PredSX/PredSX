@@ -392,6 +392,123 @@ See [`port-security.md`](port-security.md) for the full networking, port binding
 
 ---
 
+### Stage 14 — API Security Hardening
+
+After first VPS deploy, a full security audit of `hub-api` identified six production-grade gaps. All fixes live in `services/api/`.
+
+---
+
+**SecurityHeaders Middleware**
+
+Added `middleware/security.go` — injects 5 headers on every HTTP response:
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| `X-Content-Type-Options` | `nosniff` | Prevents MIME-type sniffing in browsers |
+| `X-Frame-Options` | `DENY` | Blocks clickjacking via iframe embedding |
+| `X-XSS-Protection` | `1; mode=block` | Enables XSS filter in older browsers |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | Limits referer header leakage |
+| `Content-Security-Policy` | `default-src 'none'` | Disallows all resource loading (API-only, no HTML) |
+
+Middleware is registered globally in `main.go` — all routes including `/health` and `/v1/*` get these headers automatically.
+
+---
+
+**CORS Allowlist**
+
+Replaced wildcard `Access-Control-Allow-Origin: *` with an env-var-driven allowlist in `middleware/cors.go`.
+
+- `ALLOWED_ORIGINS` env var (comma-separated) — defaults to `http://localhost:3000`
+- Requests from unlisted origins receive no `Access-Control-Allow-Origin` header (effectively blocked by browser)
+- `Vary: Origin` header added so CDN/proxies cache per-origin correctly
+- Only `GET` and `OPTIONS` methods allowed
+
+**Why this matters:** A wildcard CORS origin allows any website to make credentialed requests to your API from a user's browser. Since this API exposes live market data and will eventually handle wallet-linked positions, locking origins to known domains prevents third-party sites from silently scraping or acting on behalf of users.
+
+---
+
+**Trusted Proxies for Rate Limiting**
+
+Added `TRUSTED_PROXIES` env var to `middleware/ratelimit.go`. When set to a CIDR or IP, the rate limiter reads the real client IP from `X-Forwarded-For` only if the request originates from a trusted proxy. When unset, `RemoteAddr` is always used directly.
+
+**Why this matters:** Without trusted proxy awareness, an attacker can send `X-Forwarded-For: 1.2.3.4` from any IP and effectively bypass per-IP rate limits by rotating the header value. The TRUSTED_PROXIES guard means spoofed `X-Forwarded-For` headers from untrusted sources are ignored.
+
+`Retry-After: 60` header added to all `429` responses so clients know exactly when to retry.
+
+---
+
+**Internal Error Masking**
+
+Seven handler locations in `rest.go` that previously returned raw database errors to clients (e.g. `clickhouse: code 60, ClickHouse exception`) were updated to:
+1. Log the full internal error with `svc.Logger.Error(..., "error", err)`
+2. Return a generic `"internal server error"` string to the client
+
+**Why this matters:** Raw ClickHouse and Redis error messages expose internal hostnames, table names, schema details, and query structure. This information directly helps an attacker understand your infrastructure layout.
+
+---
+
+**HTTP Server Hardening**
+
+Two fields added to `http.Server` in `main.go`:
+
+| Field | Value | Purpose |
+|-------|-------|---------|
+| `IdleTimeout` | `60s` | Closes keep-alive connections idle for >60s — prevents connection exhaustion |
+| `MaxHeaderBytes` | `65536` (64KB) | Rejects requests with oversized headers — prevents header-based DoS |
+
+---
+
+**`/metrics` Gated Behind Debug Token**
+
+`/metrics` (Prometheus scrape endpoint) was previously public — anyone could query it and learn service internals (Goroutine counts, memory usage, open connections, latency histograms). It now requires the same `X-Debug-Token` / `?debug_token` auth as `/debug/*` routes.
+
+Returns `403 debug endpoints disabled` if `DEBUG_TOKEN` is not set in the environment.
+
+---
+
+### Stage 15 — Parallel Event Discovery
+
+**Problem:** `event_id` was empty on the majority of markets returned from `/v1/markets/{id}/related`. The endpoint always returned `[]`.
+
+**Root cause — two layers:**
+
+1. The Gamma `/markets` endpoint (used by `discoverMarkets`) omits `eventId` on many markets — it is populated inconsistently depending on whether Polymarket includes it in the market-level JSON.
+2. `discoverMarkets` and `discoverEvents` were running **sequentially** — discovery crawled all active markets first (~3.5 minutes per 100 markets due to 200ms paging sleep), and only then started event discovery. On a large dataset this meant `discoverEvents` didn't start for 30–60+ minutes after boot.
+
+**How `discoverEvents` works:**
+
+The Gamma `/events` endpoint returns event objects that each contain a `markets` array. Every market nested under an event is guaranteed to have the parent's event ID. `discoverEvents` paginates `/events`, iterates the nested markets, and explicitly sets `m.EventID = ev.ID` if the market-level field is empty — guaranteeing `event_id` is always populated before publishing to Kafka.
+
+```
+Gamma /events
+  └── event { id: "30615", markets: [ market_A, market_B, market_C ] }
+        └── each market published with event_id = "30615"
+```
+
+**Fix — parallel execution with `sync.WaitGroup`:**
+
+Both discovery loops now start simultaneously inside a `runBoth()` closure:
+
+```go
+runBoth := func(label string) {
+    var wg sync.WaitGroup
+    wg.Add(2)
+    go func() { defer wg.Done(); discoverMarkets(...) }()
+    go func() { defer wg.Done(); discoverEvents(...) }()
+    wg.Wait()
+}
+runBoth("initial discovery")   // on startup
+for { select { case <-ticker.C: runBoth("discovery cycle") } }
+```
+
+`discoverMarkets` and `discoverEvents` run concurrently. Each paginates its own endpoint independently. `wg.Wait()` ensures both complete before the next tick fires. There is no shared mutable state between the two goroutines — each only reads its own pagination cursor and publishes to its own Kafka producer reference.
+
+**Result:** `event_id` is populated within the first poll cycle (~60s) instead of after the full markets crawl. `/related` returns siblings for multi-outcome event groups immediately after the first boot cycle completes.
+
+**New env var:** `GAMMA_EVENTS_URL` (default: `https://gamma-api.polymarket.com/events`) — allows overriding the events endpoint for testing or if Polymarket changes the URL.
+
+---
+
 ### Stage 13 — VPS First Deploy: Production Bug Fixes
 
 After the first real VPS deploy, two bugs surfaced that only appeared with live Polymarket data.
@@ -450,6 +567,8 @@ Fix: Changed `rest.go` line 333 from `predsx:price:` to `live:price:`.
 | VPS first deploy | ✅ Live on Hetzner `YOUR_VPS_IP:8088` |
 | Discovery status bug fix | ✅ `DerivedStatus()` — Gamma API booleans → proper status string |
 | Price endpoint Redis key fix | ✅ `live:price:` key — processor and API now aligned |
+| API security hardening (Stage 14) | ✅ Security headers, CORS allowlist, trusted proxies, error masking, HTTP hardening, `/metrics` gated |
+| Parallel event discovery (Stage 15) | ✅ `discoverEvents` + `sync.WaitGroup` — `event_id` populated within first poll cycle |
 
 ---
 
@@ -458,8 +577,14 @@ Fix: Changed `rest.go` line 333 from `predsx:price:` to `live:price:`.
 - [vps-deploy.md](vps-deploy.md) — Full VPS deployment guide and API endpoint verification
 - [port-security.md](port-security.md) — Port bindings, networking, UFW, TLS
 - [api-reference.md](api-reference.md) — API endpoint reference and response schemas
+- [api-improvements.md](api-improvements.md) — Detailed changelog of all API improvements
 - [storage-projections.md](storage-projections.md) — Disk and RAM capacity planning
 - [rpc-failover-design.md](rpc-failover-design.md) — Polygon RPC pool rotation design
+- [env-vars.md](env-vars.md) — Complete environment variable reference for all 5 services
+- [troubleshooting.md](troubleshooting.md) — Common errors and fixes encountered in production
+- [clickhouse-queries.md](clickhouse-queries.md) — ClickHouse SQL reference for analytics and debugging
+- [rollback.md](rollback.md) — Step-by-step rollback procedure using git-hash image tags
+- [cli.md](cli.md) — CLI tool (`cmd/predsx`) subcommand reference
 
 ---
 
